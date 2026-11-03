@@ -1,3 +1,4 @@
+// @ts-ignore -- Vite processa este CSS em runtime; não é um módulo TypeScript.
 import './style.css';
 import { adaptBbdGamelog, buildPlayerProfile, rankPlayerTrends, type StatLine, type Market } from './engine';
 
@@ -183,23 +184,26 @@ async function runScan(){
   const failureReasons = new Map<string, number>();
   const addFailureReason = (reason: string) => { const key = reason.slice(0, 180) || 'Erro sem detalhe'; failureReasons.set(key, (failureReasons.get(key) || 0) + 1); };
   const batchSize=20; // Limite máximo aceite pelo endpoint do Worker.
-  const maxAttempts=2; // Uma tentativa inicial + uma única repetição no scanner.
-  const retryableStatus=(status:number)=>status===408||status===425||status===429||status>=500;
+  const maxAttempts=2; // Uma tentativa inicial + uma única repetição para erros transitórios.
+  const retryableStatus=(status:number)=>status===408||status===425||status>=500;
   const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+  let bbdRateLimitStop=false;
 
-  for(let offset=0;offset<scanPlayers.length;offset+=batchSize){
+  // Sem pré-teste: avançar diretamente para os históricos reais.
+  // Se a BBD indicar rate limit, parar o scanner e não repetir pedidos.
+
+  for(let offset=0;offset<scanPlayers.length&&!bbdRateLimitStop;offset+=batchSize){
    const batch=scanPlayers.slice(offset,offset+batchSize);
    let pending=[...batch];
    const successfulResults=new Map<string,{data:unknown[]}>();
    const attemptCounts=new Map<string,number>();
    const terminalFailures=new Set<string>();
 
-   for(let attempt=1;attempt<=maxAttempts&&pending.length;attempt++){
+   for(let attempt=1;attempt<=maxAttempts&&pending.length&&!bbdRateLimitStop;attempt++){
     target.innerHTML=`<div class="notice"><b>A analisar históricos individuais BBD</b><p>${Math.min(offset+batch.length,scanPlayers.length)} / ${scanPlayers.length} jogadores enviados.</p><p>Históricos carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · A recuperar: ${pending.length}.</p><p>Tentativa ${attempt}/${maxAttempts} (máximo de duas no scanner).</p></div>`;
     const nextPending:ScanPlayer[]=[];
 
-    // Cada pedido contém no máximo 20 IDs. Os lotes são sequenciais para não
-    // multiplicar a concorrência global contra a BBD.
+    // Cada pedido contém no máximo 20 IDs. Os lotes são sequenciais.
     for(let subOffset=0;subOffset<pending.length;subOffset+=batchSize){
      const requestPlayers=pending.slice(subOffset,subOffset+batchSize);
      requestPlayers.forEach(player=>attemptCounts.set(player.id,(attemptCounts.get(player.id)||0)+1));
@@ -208,17 +212,28 @@ async function runScan(){
        method:'POST',credentials:'include',headers:{'content-type':'application/json'},
        body:JSON.stringify({playerIds:requestPlayers.map(player=>player.id),season})
       });
-      const payload=await response.json().catch(()=>null) as {results?:Array<{playerId?:string;data?:unknown;error?:string}>;error?:string}|null;
+      const payload=await response.json().catch(()=>null) as {
+       results?:Array<{playerId?:string;data?:unknown;error?:string}>;
+       error?:string;
+       rateLimited?:boolean;
+       retryAfterSeconds?:number;
+      }|null;
       if(!response.ok){
-       const detail = typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`;
+       const detail=typeof payload?.error==='string'?payload.error:`HTTP ${response.status}`;
        addFailureReason(`Worker ${response.status}: ${detail}`);
+       if(response.status===429){
+        bbdRateLimitStop=true;
+        for(const player of requestPlayers)terminalFailures.add(player.id);
+        break;
+       }
        for(const player of requestPlayers){
         if(!retryableStatus(response.status))terminalFailures.add(player.id);
         else nextPending.push(player);
        }
        continue;
       }
-      const results=Array.isArray(payload?.results)?payload!.results!:[];
+
+      const results=Array.isArray(payload?.results)?payload.results:[];
       const resultById=new Map<string,{playerId?:string;data?:unknown;error?:string}>();
       for(const result of results){
        if(result&&typeof result.playerId==='string'&&!resultById.has(result.playerId))resultById.set(result.playerId,result);
@@ -226,18 +241,32 @@ async function runScan(){
       for(const player of requestPlayers){
        const result=resultById.get(player.id);
        if(!result||result.error||!Array.isArray(result.data)){
-        addFailureReason(result?.error || (!result ? 'Resposta Worker sem resultado para o ID' : 'Resposta Worker sem array data'));
-        nextPending.push(player);
+        addFailureReason(result?.error||(!result?'Resposta Worker sem resultado para o ID':'Resposta Worker sem array data'));
+        if(!payload?.rateLimited)nextPending.push(player);
+        else terminalFailures.add(player.id);
         continue;
        }
        successfulResults.set(player.id,{data:result.data});
       }
-     }catch{
+
+      if(payload?.rateLimited){
+       bbdRateLimitStop=true;
+       const seconds=Number(payload.retryAfterSeconds);
+       addFailureReason(`BBD rate limit: pedidos interrompidos${Number.isFinite(seconds)&&seconds>0?`; aguardar aproximadamente ${Math.ceil(seconds)} segundos`:''}`);
+       // Não repetir este lote nem enviar os lotes seguintes.
+       for(const player of requestPlayers){
+        if(!successfulResults.has(player.id))terminalFailures.add(player.id);
+       }
+       break;
+      }
+     }catch(error){
+      const detail=error instanceof Error?error.message:String(error);
+      addFailureReason(`Falha de comunicação com o Worker: ${detail}`);
       requestPlayers.forEach(player=>nextPending.push(player));
      }
     }
-    pending=nextPending.filter(player=>!successfulResults.has(player.id));
-    if(pending.length&&attempt<maxAttempts)await pause(500*attempt);
+    pending=nextPending.filter(player=>!successfulResults.has(player.id)&&!terminalFailures.has(player.id));
+    if(pending.length&&attempt<maxAttempts&&!bbdRateLimitStop)await pause(500*attempt);
    }
 
    for(const player of batch){
@@ -254,6 +283,12 @@ async function runScan(){
      scanAnalysisCoverage.failed++;
      addFailureReason(`Erro ao interpretar histórico: ${String(error)}`);
     }
+   }
+
+   if(bbdRateLimitStop){
+    // Contabilizar os jogadores ainda não enviados sem fazer mais chamadas à BBD.
+    scanAnalysisCoverage.failed+=Math.max(0,scanPlayers.length-(offset+batch.length));
+    break;
    }
   }
   scanOpportunities=candidates.sort((a,b)=>b.score-a.score).slice(0,10);
