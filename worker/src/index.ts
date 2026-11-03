@@ -655,7 +655,7 @@ if (url.pathname === '/api/espn/sync-player-ids') {
             }
 
             let lastError = 'BBD request failed';
-            for (let attempt = 1; attempt <= 3; attempt++) {
+            for (let attempt = 1; attempt <= 2; attempt++) {
               try {
                 const upstream = await fetch(`https://api.bigballsdata.com/v1/players/${encodeURIComponent(playerId)}/gamelog?season=${season}`, {
                   headers: { authorization: `Bearer ${env.BIGBALLSDATA_API_KEY}`, accept: 'application/json' }
@@ -678,9 +678,9 @@ if (url.pathname === '/api/espn/sync-player-ids') {
               } catch (error) {
                 lastError = String(error);
               }
-              if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 400 * attempt));
+              if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 400));
             }
-            return { playerId, error: lastError, attempts: 3 };
+            return { playerId, error: lastError, attempts: 2 };
           } catch (error) {
             return { playerId, error: String(error), attempts: 1 };
           }

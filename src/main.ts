@@ -105,7 +105,7 @@ function scan(){return `<section class="page-title"><p class="eyebrow">FASE 1 ·
  <div id="bbd-profile" class="scan-results" aria-live="polite"></div>
  </section><section class="panel"><p class="eyebrow">CRITÉRIO DE SELEÇÃO</p><h2>Até 10 oportunidades</h2><p class="body-copy">A lista é ordenada por qualidade estatística, estabilidade da projeção, contexto e incerteza. Se só existirem 4 oportunidades que cumpram os critérios, serão apresentadas 4.</p></section>`}
 function opportunities(){
- const rows=scanOpportunities.slice(0,10).map((x,i)=>`<div class="source"><span><b>#${i+1} · ${escapeHtml(x.playerName)} — ${escapeHtml(x.teamName)}</b><small>${escapeHtml(x.marketLabel)} · ${x.direction} · Índice descritivo ${x.score}/100</small><small>${escapeHtml(x.explanation)}</small><small>Últimos 5: ${x.recentMean.toFixed(1)} · 5 anteriores: ${x.previousMean.toFixed(1)} · Época: ${x.seasonMean.toFixed(1)} · Amostra: ${x.seasonSample} jogos</small></span><strong class="pending">${x.direction}</strong></div>`).join('');
+ const rows=scanOpportunities.slice(0,10).map((x,i)=>`<div class="source"><span><b>#${i+1} · ${escapeHtml(x.playerName)} — ${escapeHtml(x.teamName)}</b><small>${escapeHtml(x.marketLabel)} · <b>${x.suggestedLine.toFixed(1)} ${x.direction}</b> · Índice descritivo ${x.score}/100</small><small>${escapeHtml(x.explanation)}</small><small>Últimos 5: ${x.recentMean.toFixed(1)} · Últimos 10: ${x.recent10Mean.toFixed(1)} · 5 anteriores: ${x.previousMean.toFixed(1)} · Época: ${x.seasonMean.toFixed(1)}</small><small>Resultados recentes: ${x.recentResults.map(value=>value.toFixed(1)).join(' · ')} · A favor da linha: ${x.recentHits}/${x.recentSample}</small></span><strong class="pending">${x.suggestedLine.toFixed(1)} ${x.direction}</strong></div>`).join('');
  return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Oportunidades</h1><p class="sub">Apenas jogadores com alterações recentes sustentadas nos dados. Não são apostas com valor confirmado.</p></section><section class="panel"><div class="notice"><b>${escapeHtml(scanAnalysisStatus)}</b><p>Históricos solicitados: ${scanAnalysisCoverage.requested} · Carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · Falhas definitivas: ${scanAnalysisCoverage.failed} · Recuperados após repetição: ${scanAnalysisCoverage.retried}</p></div>${rows||'<div class="empty-state compact"><h2>Sem oportunidades suficientemente fundamentadas</h2><p>Não foram encontrados desvios recentes que cumpram os critérios de amostra, consistência e dimensão do sinal. Não vamos preencher o Top 10 artificialmente.</p></div>'}<p class="footnote">O índice ordena desvios descritivos recentes. Não é probabilidade de acerto, linha de bookmaker nem EV. Matchups, lesões e rotação ainda não estão incorporados no ranking.</p></section>`;
 }
 function validator(){return `<section class="page-title"><p class="eyebrow">FASES 3 E 4 · VALIDAÇÃO</p><h1>Validador de aposta</h1><p class="sub">Introduz a linha e a odd da Spinbetter para um mercado previamente analisado.</p></section><section class="panel"><div class="notice"><b>Motor de probabilidade ainda não ligado</b><p>Não introduzas uma probabilidade manual para obter um veredicto. A probabilidade terá de vir do modelo validado e associado à análise selecionada.</p></div><label>Jogador<input id="v-player" placeholder="Selecionar oportunidade analisada" /></label><div class="two"><label>Mercado<select id="v-market">${Object.entries(marketNames).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select></label><label>Linha da Spinbetter<input id="v-line" type="number" step="0.5" placeholder="Ex.: 24.5" /></label></div><label>Odd decimal<input id="v-odds" type="number" min="1.01" step="0.01" placeholder="Ex.: 1.90" /></label><button class="primary full" id="save-odds">Guardar dados da cotação</button><p class="footnote">Guardar a cotação não significa recomendar a aposta. O veredicto só será calculado quando existir uma previsão válida para o mesmo jogador, mercado e linha.</p></section><section class="panel"><h2>Critérios do veredicto</h2><div class="verdict-row"><b>VALOR</b><span>EV positivo após ajuste conservador de incerteza.</span></div><div class="verdict-row"><b>SEM VALOR</b><span>Preço insuficiente face à probabilidade estimada.</span></div><div class="verdict-row"><b>DADOS INSUFICIENTES</b><span>Previsão, contexto ou cotação sem validação suficiente.</span></div></section>`}
@@ -180,8 +180,10 @@ async function runScan(){
   scanAnalysisCoverage={requested:scanPlayers.length,loaded:0,noHistory:0,failed:0,retried:0};
   const season=Number(new Date().getFullYear());
   const candidates: import('./engine').TrendCandidate[]=[];
+  const failureReasons = new Map<string, number>();
+  const addFailureReason = (reason: string) => { const key = reason.slice(0, 180) || 'Erro sem detalhe'; failureReasons.set(key, (failureReasons.get(key) || 0) + 1); };
   const batchSize=20; // Limite máximo aceite pelo endpoint do Worker.
-  const maxAttempts=4; // Primeira tentativa + até três repetições.
+  const maxAttempts=2; // Uma tentativa inicial + uma única repetição no scanner.
   const retryableStatus=(status:number)=>status===408||status===425||status===429||status>=500;
   const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
 
@@ -193,7 +195,7 @@ async function runScan(){
    const terminalFailures=new Set<string>();
 
    for(let attempt=1;attempt<=maxAttempts&&pending.length;attempt++){
-    target.innerHTML=`<div class="notice"><b>A analisar históricos individuais BBD</b><p>${Math.min(offset+batch.length,scanPlayers.length)} / ${scanPlayers.length} jogadores enviados.</p><p>Históricos carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · A recuperar: ${pending.length}.</p><p>Tentativa ${attempt}/${maxAttempts} para os registos ainda não confirmados.</p></div>`;
+    target.innerHTML=`<div class="notice"><b>A analisar históricos individuais BBD</b><p>${Math.min(offset+batch.length,scanPlayers.length)} / ${scanPlayers.length} jogadores enviados.</p><p>Históricos carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · A recuperar: ${pending.length}.</p><p>Tentativa ${attempt}/${maxAttempts} (máximo de duas no scanner).</p></div>`;
     const nextPending:ScanPlayer[]=[];
 
     // Cada pedido contém no máximo 20 IDs. Os lotes são sequenciais para não
@@ -208,6 +210,8 @@ async function runScan(){
       });
       const payload=await response.json().catch(()=>null) as {results?:Array<{playerId?:string;data?:unknown;error?:string}>;error?:string}|null;
       if(!response.ok){
+       const detail = typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`;
+       addFailureReason(`Worker ${response.status}: ${detail}`);
        for(const player of requestPlayers){
         if(!retryableStatus(response.status))terminalFailures.add(player.id);
         else nextPending.push(player);
@@ -222,6 +226,7 @@ async function runScan(){
       for(const player of requestPlayers){
        const result=resultById.get(player.id);
        if(!result||result.error||!Array.isArray(result.data)){
+        addFailureReason(result?.error || (!result ? 'Resposta Worker sem resultado para o ID' : 'Resposta Worker sem array data'));
         nextPending.push(player);
         continue;
        }
@@ -242,17 +247,19 @@ async function runScan(){
     if(result.data.length===0){scanAnalysisCoverage.noHistory++;continue;}
     try{
      const rows=adaptBbdGamelog({data:result.data});
-     if(!rows.length){scanAnalysisCoverage.failed++;continue;}
+     if(!rows.length){scanAnalysisCoverage.failed++;addFailureReason('Histórico recebido, mas sem linhas válidas após adaptação');continue;}
      scanAnalysisCoverage.loaded++;
      candidates.push(...rankPlayerTrends(player,rows));
-    }catch{
+    }catch(error){
      scanAnalysisCoverage.failed++;
+     addFailureReason(`Erro ao interpretar histórico: ${String(error)}`);
     }
    }
   }
   scanOpportunities=candidates.sort((a,b)=>b.score-a.score).slice(0,10);
   scanAnalysisStatus=scanAnalysisCoverage.loaded===0?'Não foi possível carregar históricos BBD válidos.':`Análise concluída: ${scanOpportunities.length} candidatos seleccionados após avaliar os históricos disponíveis.`;
-  target.innerHTML=`<div class="notice"><b>${scanEvents.length} jogos encontrados nas próximas 48 horas</b><p>${escapeHtml(scanRosterStatus)}</p><p>${escapeHtml(scanAnalysisStatus)}</p><p>Históricos: ${scanAnalysisCoverage.loaded} carregados · ${scanAnalysisCoverage.noHistory} sem registos nesta época · ${scanAnalysisCoverage.failed} falhas definitivas · ${scanAnalysisCoverage.retried} recuperados após repetição.</p></div><button class="primary full" id="open-opportunities">Ver shortlist de oportunidades (${scanOpportunities.length})</button>`;
+  const failureSummary = [...failureReasons.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([reason,count])=>`<p>${count}x — ${escapeHtml(reason)}</p>`).join('');
+  target.innerHTML=`<div class="notice"><b>${scanEvents.length} jogos encontrados nas próximas 48 horas</b><p>${escapeHtml(scanRosterStatus)}</p><p>${escapeHtml(scanAnalysisStatus)}</p><p>Históricos: ${scanAnalysisCoverage.loaded} carregados · ${scanAnalysisCoverage.noHistory} sem registos nesta época · ${scanAnalysisCoverage.failed} falhas definitivas · ${scanAnalysisCoverage.retried} recuperados após repetição.</p>${failureSummary ? `<hr><b>Principais causas das falhas</b>${failureSummary}` : ''}</div><button class="primary full" id="open-opportunities">Ver shortlist de oportunidades (${scanOpportunities.length})</button>`;
   document.querySelector('#open-opportunities')?.addEventListener('click',()=>{active='opportunities';render();});
  }catch(error){
   target.innerHTML=`<div class="notice"><b>Não foi possível concluir o scanner</b><p>${escapeHtml(String(error))}</p><p>Não foram fabricados jogos nem resultados para datas cuja consulta falhou.</p></div>`;
