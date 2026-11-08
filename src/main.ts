@@ -44,7 +44,7 @@ const render = () => {
   app.innerHTML = `
    <main class="auth-shell">
     <section class="panel auth-panel">
-     <div class="brand"><div class="mark">E</div><div><b>EDGE NBA AI</b><small>ACESSO PRIVADO</small></div></div>
+     <div class="brand"><img class="mark" src="/edge-nba-ai-logo.png" alt="EDGE NBA AI" /><div><b>EDGE NBA AI</b><small>ACESSO PRIVADO</small></div></div>
      <p class="eyebrow">AUTENTICAÇÃO</p><h1>Entrar na plataforma</h1>
      <p class="sub">Introduz a palavra-passe para aceder à tua aplicação.</p>
      <form id="login-form">
@@ -79,7 +79,7 @@ const render = () => {
  }
  const content = active==='dashboard' ? dashboard() : active==='scan' ? scan() : active==='opportunities' ? opportunities() : active==='validator' ? validator() : active==='history' ? history() : settings();
  app.innerHTML = `
-  <header><div class="brand"><div class="mark">E</div><div><b>EDGE NBA AI</b><small>QUANTITATIVE PLAYER PROP RESEARCH</small></div></div><span class="env"><i></i> EDGE NBA AI · ONLINE</span></header>
+  <header><div class="brand"><img class="mark" src="/edge-nba-ai-logo.png" alt="EDGE NBA AI" /><div><b>EDGE NBA AI</b><small>QUANTITATIVE PLAYER PROP RESEARCH</small></div></div><span class="env"><i></i> EDGE NBA AI · ONLINE</span></header>
   <main>${content}</main>
   <nav>${tabs.map(t=>`<button class="nav-item ${active===t.id?'selected':''}" data-tab="${t.id}"><span>${t.icon}</span><small>${t.label}</small></button>`).join('')}</nav>`;
  document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b=>b.addEventListener('click',()=>{active=b.dataset.tab as Tab;render()}));
@@ -203,11 +203,13 @@ async function loadOnesToWatch(){
   const response=await fetch(`${API_BASE}/api/ones-to-watch`,{credentials:'include'});
   const data=await response.json() as {success?:boolean;cached?:boolean;pick?:Record<string,any>;error?:string;message?:string};
   const p=data.pick;
+  const explanation=p?.explanation||{};
+  const source=p?.source||{};
   if(!response.ok||!p){
    target.innerHTML=`<div class="notice"><b>Escolha diária indisponível</b><p>${otwEscape(data.message||data.error||`HTTP ${response.status}`)}</p><p class="footnote">Confirma se a D1 local contém históricos suficientes.</p></div>`;
   }else{
    const market=marketNames[String(p.market)]||p.marketLabel||p.market||'—';
-   const absences=[...(Array.isArray(p.confirmedAbsences)?p.confirmedAbsences:[]),...(Array.isArray(p.absentTeammates)?p.absentTeammates:[])];
+   const absences=[...(Array.isArray(explanation.confirmedAbsences)?explanation.confirmedAbsences:[]),...(Array.isArray(explanation.absentTeammates)?explanation.absentTeammates:[])];
    target.innerHTML=`
    <article class="opportunity-card">
     <div class="section-head"><span class="chip">ESCOLHA DIÁRIA</span><span class="chip">${otwEscape(p.confidence)}</span></div>
@@ -219,13 +221,16 @@ async function loadOnesToWatch(){
      <div><span>LINHA</span><strong>${otwEscape(p.suggestedLine)}</strong></div>
     </div>
     <div class="source-row"><span>Índice interno</span><b>${otwEscape(p.score)}/100</b></div>
-    <div class="source-row"><span>Média recente</span><b>${otwEscape(p.recentMean)}</b></div>
-    <div class="source-row"><span>Média da época</span><b>${otwEscape(p.seasonMean)}</b></div>
-    <div class="source-row"><span>Amostra contextual</span><b>${otwEscape(p.contextualSample??0)} jogos</b></div>
-    <h3>Fundamentação</h3>${otwList(p.reasons,'Sem fundamentação adicional.')}
+    <div class="source-row"><span>Média recente</span><b>${otwEscape(typeof explanation.recentMean==="number"?explanation.recentMean.toFixed(1):"—")}</b></div>
+    <div class="source-row"><span>Média da época</span><b>${otwEscape(typeof explanation.seasonMean==="number"?explanation.seasonMean.toFixed(1):"—")}</b></div>
+    <div class="source-row"><span>Minutos recentes</span><b>${otwEscape(typeof explanation.recentMinutes==="number"?explanation.recentMinutes.toFixed(1):"—")}</b></div>
+    <div class="source-row"><span>Minutos de referência</span><b>${otwEscape(typeof explanation.baselineMinutes==="number"?explanation.baselineMinutes.toFixed(1):"—")}</b></div>
+    <div class="source-row"><span>Amostra contextual</span><b>${otwEscape(explanation.contextualSample??0)} jogos</b></div>
+    <div class="source-row"><span>Amostra do jogador</span><b>${otwEscape(source.playerSample??0)} jogos</b></div>
+    <h3>Fundamentação</h3>${otwList(explanation.reasons,'Sem fundamentação adicional.')}
     <h3>Ausências consideradas</h3>${otwList(absences,'Não existem ausências contextuais registadas.')}
-    <h3>Riscos</h3>${otwList(p.risks,'Sem riscos adicionais registados.')}
-    <h3>Limitações</h3>${otwList(p.limitations,'Sem limitações adicionais registadas.')}
+    <h3>Riscos</h3>${otwList(explanation.risks,'Sem riscos adicionais registados.')}
+    <h3>Limitações</h3>${otwList(explanation.limitations,'Sem limitações adicionais registadas.')}
     <p class="footnote">${data.cached?'Escolha já guardada para esta data.':'Escolha guardada nesta consulta.'}</p>
    </article>`;
   }

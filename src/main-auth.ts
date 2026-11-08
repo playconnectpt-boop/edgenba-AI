@@ -23,7 +23,7 @@ const render = () => {
   app.innerHTML = `
    <main class="auth-shell">
     <section class="panel auth-panel">
-     <div class="brand"><div class="mark">E</div><div><b>EDGE NBA AI</b><small>ACESSO PRIVADO</small></div></div>
+     <div class="brand"><img class="mark" src="/edge-nba-ai-logo.png" alt="EDGE NBA AI" /><div><b>EDGE NBA AI</b><small>ACESSO PRIVADO</small></div></div>
      <p class="eyebrow">AUTENTICAÇÃO</p><h1>Entrar na plataforma</h1>
      <p class="sub">Introduz a palavra-passe para aceder à tua aplicação.</p>
      <form id="login-form">
@@ -58,7 +58,7 @@ const render = () => {
  }
  const content = active==='dashboard' ? dashboard() : active==='scan' ? scan() : active==='opportunities' ? opportunities() : active==='validator' ? validator() : active==='history' ? history() : settings();
  app.innerHTML = `
-  <header><div class="brand"><div class="mark">E</div><div><b>EDGE NBA AI</b><small>QUANTITATIVE PLAYER PROP RESEARCH</small></div></div><span class="env"><i></i> AMBIENTE DE DESENVOLVIMENTO</span></header>
+  <header><div class="brand"><img class="mark" src="/edge-nba-ai-logo.png" alt="EDGE NBA AI" /><div><b>EDGE NBA AI</b><small>QUANTITATIVE PLAYER PROP RESEARCH</small></div></div><span class="env"><i></i> AMBIENTE DE DESENVOLVIMENTO</span></header>
   <main>${content}</main>
   <nav>${tabs.map(t=>`<button class="nav-item ${active===t.id?'selected':''}" data-tab="${t.id}"><span>${t.icon}</span><small>${t.label}</small></button>`).join('')}</nav>`;
  document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b=>b.addEventListener('click',()=>{active=b.dataset.tab as Tab;render()}));

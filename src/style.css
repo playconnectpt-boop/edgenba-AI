@@ -904,3 +904,22 @@ input, select {
   border-color: #263747;
 }
 
+
+/* OFFICIAL EDGE NBA AI LOGO */
+.mark {
+  display: block;
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+  background: transparent !important;
+  box-shadow: none !important;
+  border-radius: 0;
+  flex-shrink: 0;
+}
+
+@media (max-width: 600px) {
+  .mark {
+    width: 37px;
+    height: 37px;
+  }
+}
