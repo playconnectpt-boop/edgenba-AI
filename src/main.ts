@@ -1,5 +1,6 @@
 // @ts-ignore -- Vite processa este CSS em runtime; não é um módulo TypeScript.
 import './style.css';
+import { parseEspnInjuryReport } from './injuries';
 import { adaptEspnGamelog, buildPlayerProfile, rankPlayerTrends, uniquePlayersTop, type StatLine, type Market } from './engine';
 
 type Tab = 'dashboard'|'scan'|'opportunities'|'validator'|'history'|'settings';
@@ -31,7 +32,7 @@ type ESPNEvent = { id:string; name:string; date:string; status?:{type?:{descript
 let scanEvents: ESPNEvent[] = [];
 let scanRetrievedAt = '';
 let scanInjuryText = 'Relatório de lesões ainda não consultado';
-type ScanPlayer = { id:string; name:string; team_name:string; position?:string|null; rotation_games?:number; avg_minutes?:number; recent10_avg_minutes?:number; status?:string; rotation_eligible?:boolean };
+type ScanPlayer = { id:string; espn_id?:string|null; name:string; team_name:string; position?:string|null; rotation_games?:number; avg_minutes?:number; recent10_avg_minutes?:number; status?:string; rotation_eligible?:boolean };
 let scanPlayers: ScanPlayer[] = [];
 let scanRosterStatus = 'Plantéis ainda não consultados';
 let scanAvailabilityRows = '';
@@ -109,37 +110,13 @@ function scan(){return `<section class="page-title"><p class="eyebrow">FASE 1 ·
  </section><section class="panel"><p class="eyebrow">CRITÉRIO DE SELEÇÃO</p><h2>Até 10 oportunidades</h2><p class="body-copy">A lista é ordenada por qualidade estatística, estabilidade da projeção, contexto e incerteza. Se só existirem 4 oportunidades que cumpram os critérios, serão apresentadas 4.</p></section>`}
 function opportunities(){
  const unique=uniquePlayersTop(scanOpportunities,10);
- const rows=unique.map((x,i)=>{const playerStatus=scanPlayers.find(p=>p.id===x.playerId)?.status||'DISPONÍVEL';const availability=/QUESTIONÁVEL|DUVIDOSO/.test(playerStatus)?' · CENÁRIO CONDICIONAL':'';return `<div class="source"><span><b>#${i+1} · ${escapeHtml(x.playerName)} — ${escapeHtml(x.teamName)} · ${escapeHtml(playerStatus)}${availability}</b><small>${escapeHtml(x.marketLabel)} · <b>${x.suggestedLine.toFixed(1)} ${x.direction}</b> · Índice descritivo ${x.score}/100 · Qualidade ${escapeHtml(x.quality)} · Confiança ${escapeHtml(x.confidence)}</small><small>${escapeHtml(x.explanation)}</small><small>Últimos 5: ${x.recentMean.toFixed(1)} (${x.recentSample} registos) · Últimos 10: ${x.recent10Mean.toFixed(1)} · 5 anteriores: ${x.previousMean.toFixed(1)} (${x.previousSample} registos) · Época: ${x.seasonMean.toFixed(1)} (${x.seasonSample} registos)</small><small>Resultados recentes: ${x.recentResults.map(value=>value.toFixed(1)).join(' · ')} · A favor da linha: ${x.recentHits}/${x.recentSample}</small></span><strong class="pending">${x.suggestedLine.toFixed(1)} ${x.direction}</strong></div>`;}).join('');
+ const rows=unique.map((x,i)=>{const playerStatus=scanPlayers.find(p=>p.id===x.playerId)?.status||'ESTADO DESCONHECIDO';const availability=/QUESTIONÁVEL|DUVIDOSO/.test(playerStatus)?' · CENÁRIO CONDICIONAL':'';return `<div class="source"><span><b>#${i+1} · ${escapeHtml(x.playerName)} — ${escapeHtml(x.teamName)} · ${escapeHtml(playerStatus)}${availability}</b><small>${escapeHtml(x.marketLabel)} · <b>${x.suggestedLine.toFixed(1)} ${x.direction}</b> · Índice descritivo ${x.score}/100 · Qualidade ${escapeHtml(x.quality)} · Confiança ${escapeHtml(x.confidence)}</small><small>${escapeHtml(x.explanation)}</small><small>Últimos 5: ${x.recentMean.toFixed(1)} (${x.recentSample} registos) · Últimos 10: ${x.recent10Mean.toFixed(1)} · 5 anteriores: ${x.previousMean.toFixed(1)} (${x.previousSample} registos) · Época: ${x.seasonMean.toFixed(1)} (${x.seasonSample} registos)</small><small>Resultados recentes: ${x.recentResults.map(value=>value.toFixed(1)).join(' · ')} · A favor da linha: ${x.recentHits}/${x.recentSample}</small></span><strong class="pending">${x.suggestedLine.toFixed(1)} ${x.direction}</strong></div>`;}).join('');
  return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Oportunidades</h1><p class="sub">Apenas jogadores com alterações recentes sustentadas nos dados. Não são apostas com valor confirmado.</p></section><section class="panel"><div class="notice"><b>${escapeHtml(scanAnalysisStatus)}</b><p>Históricos solicitados: ${scanAnalysisCoverage.requested} · Carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · Falhas definitivas: ${scanAnalysisCoverage.failed} · Recuperados após repetição: ${scanAnalysisCoverage.retried}</p></div>${rows||'<div class="empty-state compact"><h2>Sem oportunidades suficientemente fundamentadas</h2><p>Não foram encontrados desvios recentes que cumpram os critérios de amostra, consistência e dimensão do sinal. Não vamos preencher o Top 10 artificialmente.</p></div>'}<p class="footnote">O índice ordena desvios descritivos recentes. Não é probabilidade de acerto, linha de bookmaker nem EV. O estado de disponibilidade é apresentado junto ao jogador; os estados ESPN não excluem jogadores da base de rotação.</p></section>`;
 }
 function validator(){return `<section class="page-title"><p class="eyebrow">FASES 3 E 4 · VALIDAÇÃO</p><h1>Validador de aposta</h1><p class="sub">Introduz a linha e a odd da Spinbetter para um mercado previamente analisado.</p></section><section class="panel"><div class="notice"><b>Motor de probabilidade ainda não ligado</b><p>Não introduzas uma probabilidade manual para obter um veredicto. A probabilidade terá de vir do modelo validado e associado à análise selecionada.</p></div><label>Jogador<input id="v-player" placeholder="Selecionar oportunidade analisada" /></label><div class="two"><label>Mercado<select id="v-market">${Object.entries(marketNames).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select></label><label>Linha da Spinbetter<input id="v-line" type="number" step="0.5" placeholder="Ex.: 24.5" /></label></div><label>Odd decimal<input id="v-odds" type="number" min="1.01" step="0.01" placeholder="Ex.: 1.90" /></label><button class="primary full" id="save-odds">Guardar dados da cotação</button><p class="footnote">Guardar a cotação não significa recomendar a aposta. O veredicto só será calculado quando existir uma previsão válida para o mesmo jogador, mercado e linha.</p></section><section class="panel"><h2>Critérios do veredicto</h2><div class="verdict-row"><b>VALOR</b><span>EV positivo após ajuste conservador de incerteza.</span></div><div class="verdict-row"><b>SEM VALOR</b><span>Preço insuficiente face à probabilidade estimada.</span></div><div class="verdict-row"><b>DADOS INSUFICIENTES</b><span>Previsão, contexto ou cotação sem validação suficiente.</span></div></section>`}
 function history(){return `<section class="page-title"><p class="eyebrow">CONTROLO DE DESEMPENHO</p><h1>Histórico</h1><p class="sub">Registo de previsões, linhas, odds introduzidas, resultados e calibração do modelo.</p></section><section class="status-grid"><article class="metric"><span>Previsões registadas</span><strong>0</strong></article><article class="metric"><span>Taxa de acerto</span><strong>—</strong></article><article class="metric"><span>ROI observado</span><strong>—</strong></article></section><section class="empty-state compact"><h2>Sem histórico disponível</h2><p>Os resultados só serão calculados com previsões guardadas antes dos jogos e resultados oficiais posteriores. O modelo será avaliado fora da amostra.</p></section>`}
 function settings(){return `<section class="page-title"><p class="eyebrow">CONFIGURAÇÃO</p><h1>Fontes e segurança</h1><p class="sub">A aplicação é privada e protegida por sessão.</p></section><section class="panel"><h2>Autenticação</h2><p class="body-copy">Acesso protegido pelo Worker Cloudflare. A sessão expira após 7 dias.</p><div class="source-row"><span>Proteção de acesso</span><b class="pending">ATIVA</b></div></section><section class="panel"><h2>Fornecedores de dados</h2>${provider('NBA statistics','Dados históricos e box scores','POR CONFIGURAR')}${provider('Injury report','Estado oficial dos jogadores','POR CONFIGURAR')}<button class="secondary full" id="check-provider">Verificar configuração</button></section><section class="panel"><h2>Política de integridade</h2><ul class="rules"><li>Guardar fonte e timestamp de cada registo.</li><li>Separar factos confirmados de cenários condicionais.</li><li>Não confundir hit rate histórico com probabilidade futura.</li><li>Não declarar EV sem odd válida e previsão calibrada.</li><li>Registar versão do modelo e dados usados.</li></ul></section>`}
 function provider(name:string,desc:string,status:string){return `<div class="source"><span><b>${name}</b><small>${desc}</small></span><strong class="pending">${status}</strong></div>`}
-
-function normalizePlayerName(value:string){return value.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]/g,'');}
-function extractEspnInjuryStatuses(payload:unknown){
- const found=new Map<string,string>();
- const seen=new Set<object>();
- const walk=(value:unknown)=>{
-  if(!value||typeof value!=='object'||seen.has(value as object))return;
-  seen.add(value as object);
-  const node=value as Record<string,unknown>;
-  const athlete=node.athlete&&typeof node.athlete==='object'?node.athlete as Record<string,unknown>:null;
-  const name=String(athlete?.displayName||athlete?.fullName||node.displayName||node.fullName||node.name||'').trim();
-  const rawStatus=node.status??node.injuryStatus??node.type??node.description;
-  const status=typeof rawStatus==='string'?rawStatus:
-   rawStatus&&typeof rawStatus==='object'?(()=>{const obj=rawStatus as Record<string,unknown>;const nested=obj.type&&typeof obj.type==='object'?obj.type as Record<string,unknown>:{};return String(nested.description||nested.name||obj.description||obj.name||obj.abbreviation||'');})():'';
-  if(name&&status&&/(out|injur|suspend|question|doubt|probab|day.to.day|inactive)/i.test(status)){
-   const label=/suspend/i.test(status)?'SUSPENSO':/question/i.test(status)?'QUESTIONÁVEL':/doubt/i.test(status)?'DUVIDOSO':/probab/i.test(status)?'PROVÁVEL':/inactive/i.test(status)?'INATIVO':'LESIONADO';
-   found.set(normalizePlayerName(name),label);
-  }
-  if(Array.isArray(value)){for(const child of value)walk(child);}
-  else for(const child of Object.values(node))walk(child);
- };
- walk(payload);
- return found;
-}
 
 async function runScan(){
  const target=document.querySelector<HTMLDivElement>('#scan-results');
@@ -181,11 +158,16 @@ async function runScan(){
   scanRetrievedAt=new Date().toISOString();
   scanInjuryText='Relatório de lesões indisponível';
   let injuryStatuses=new Map<string,string>();
+  let injuryReportAvailable=false;
   const injRes=await injPromise;
   if(injRes?.ok){
    const injuryPayload=await injRes.json() as {retrievedAt?:string;data?:unknown};
-   injuryStatuses=extractEspnInjuryStatuses(injuryPayload.data??injuryPayload);
-   scanInjuryText=injuryPayload.retrievedAt?`Relatório ESPN consultado às ${new Date(injuryPayload.retrievedAt).toLocaleTimeString('pt-PT')}`:'Relatório ESPN consultado';
+   const parsedReport=parseEspnInjuryReport(injuryPayload);
+   injuryStatuses=parsedReport.statuses;
+   injuryReportAvailable=parsedReport.valid;
+   scanInjuryText=parsedReport.valid
+    ? injuryPayload.retrievedAt?`Relatório ESPN consultado às ${new Date(injuryPayload.retrievedAt).toLocaleTimeString('pt-PT')}`:'Relatório ESPN consultado'
+    : 'Relatório ESPN inválido ou com estrutura inesperada';
   }
 
   scanPlayers=[];
@@ -202,11 +184,11 @@ async function runScan(){
    const roster=Array.isArray(rosterPayload.players)?rosterPayload.players:[];
    scanPlayers=roster.filter(player=>player.rotation_eligible===true).map(player=>({
     ...player,
-    status:injuryStatuses.get(normalizePlayerName(player.name))||'DISPONÍVEL'
+    status:!injuryReportAvailable?'ESTADO DESCONHECIDO':player.espn_id?(injuryStatuses.get(player.espn_id)||'SEM REGISTO NO RELATÓRIO ESPN'):'ID ESPN NÃO MAPEADO'
    }));
    scanRosterStatus=`${scanPlayers.length} jogadores de rotação identificados (${rosterPayload.meta?.rotation_count??scanPlayers.length} elegíveis) em ${rosterPayload.meta?.teams_found??0}/${rosterPayload.meta?.teams_requested??teamNames.length} equipas`;
    const statusCounts=new Map<string,number>();
-   for(const player of scanPlayers){const status=player.status;if(status && status!=='DISPONÍVEL')statusCounts.set(status,(statusCounts.get(status)||0)+1);}
+   for(const player of scanPlayers){const status=player.status||'ESTADO DESCONHECIDO';statusCounts.set(status,(statusCounts.get(status)||0)+1);}
    if(statusCounts.size)scanRosterStatus+=`. Estados: ${[...statusCounts].map(([status,count])=>`${status}: ${count}`).join(', ')}`;
    scanAvailabilityRows=scanPlayers.filter(player=>player.status!=='DISPONÍVEL').map(player=>`<div class="source"><span><b>${escapeHtml(player.name)}</b><small>${escapeHtml(player.team_name)} · ${Number(player.recent10_avg_minutes||0).toFixed(1)} min médios nos últimos 10 jogos</small></span><strong class="pending">${escapeHtml(player.status||'ESTADO DESCONHECIDO')}</strong></div>`).join('');
    if(rosterPayload.missing_teams?.length)scanRosterStatus+=`. Equipas sem correspondência: ${rosterPayload.missing_teams.join(', ')}`;
@@ -318,7 +300,7 @@ async function runScan(){
      const rows=adaptEspnGamelog({data:result.data});
      if(!rows.length){scanAnalysisCoverage.failed++;addFailureReason('Histórico recebido, mas sem linhas válidas após adaptação');continue;}
      scanAnalysisCoverage.loaded++;
-     const status=player.status||'DISPONÍVEL';
+     const status=player.status||'ESTADO DESCONHECIDO';
      if(!/LESIONADO|SUSPENSO|INATIVO|OUT/i.test(status)) candidates.push(...rankPlayerTrends(player,rows));
     }catch(error){
      scanAnalysisCoverage.failed++;

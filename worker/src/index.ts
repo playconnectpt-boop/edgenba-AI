@@ -501,6 +501,16 @@ const worker: WorkerHandler = {
             p.name AS name,
             ps.team_name,
             p.position,
+            (
+              SELECT psi.source_player_id
+              FROM player_source_ids psi
+              WHERE psi.player_id = p.player_id
+                AND psi.source = 'ESPN'
+                AND psi.season = ps.season
+                AND psi.verified = 1
+              ORDER BY psi.updated_at DESC
+              LIMIT 1
+            ) AS espn_id,
             COALESCE(r.appearances, 0) AS rotation_games,
             COALESCE(r.avg_minutes, 0) AS avg_minutes,
             COALESCE(r.recent10_avg_minutes, 0) AS recent10_avg_minutes,
@@ -518,6 +528,7 @@ const worker: WorkerHandler = {
           id: String(row.id),
           name: String(row.name),
           team_name: String(row.team_name),
+          espn_id: row.espn_id == null ? null : String(row.espn_id),
           position: row.position == null ? null : String(row.position),
           rotation_games: Number(row.rotation_games) || 0,
           avg_minutes: Number(row.avg_minutes) || 0,
