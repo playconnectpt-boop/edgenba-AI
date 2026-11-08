@@ -1,12 +1,27 @@
 export interface Env {
   DB: any;
-  BIGBALLSDATA_API_KEY?: string;
   APP_ORIGIN?: string;
   APP_PASSWORD: string;
   SESSION_SECRET: string;
 }
 
 const ESPN = 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba';
+
+// A época NBA começa em julho: julho-dezembro usa o ano civil; janeiro-junho usa o anterior.
+const nbaSeasonForDate = (date = new Date()) => {
+  const year = date.getUTCFullYear();
+  return date.getUTCMonth() >= 6 ? year : year - 1;
+};
+
+const espnTeamIdsFromIndex = (payload: any): string[] => {
+  const teams: any[] = payload?.sports?.flatMap((sport: any) =>
+    (sport?.leagues || []).flatMap((league: any) => league?.teams || [])
+  ) || [];
+  const ids: string[] = teams
+    .map((entry: any) => String(entry?.team?.id || entry?.id || ''))
+    .filter((id: string) => /^\d+$/.test(id));
+  return Array.from(new Set<string>(ids));
+};
 const cors = (env: Env) => ({
   'access-control-allow-origin': env.APP_ORIGIN || 'null',
   'access-control-allow-credentials': 'true',
@@ -67,7 +82,53 @@ async function espn(path: string, ttlSeconds = 60): Promise<unknown> {
   return data;
 }
 
-export default {
+const ESPN_WEB = 'https://site.web.api.espn.com/apis/common/v3/sports/basketball/nba';
+
+async function espnPlayerGamelog(athleteId: string, espnSeason: number): Promise<any> {
+  const cache = (caches as unknown as { default: Cache }).default;
+  const url = `${ESPN_WEB}/athletes/${encodeURIComponent(athleteId)}/gamelog?season=${espnSeason}&seasontype=2`;
+  const key = new Request(url, { method: 'GET' });
+  const cached = await cache.match(key);
+  if (cached) return cached.json();
+  const response = await fetch(url, { headers: { accept: 'application/json' } });
+  if (!response.ok) throw new Error(`ESPN gamelog HTTP ${response.status}`);
+  const data = await response.json();
+  const cachedResponse = new Response(JSON.stringify(data), {
+    headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=3600' }
+  });
+  await cache.put(key, cachedResponse);
+  return data;
+}
+
+const parseStatNumber = (value: unknown): number | null => {
+  const parsed = Number.parseFloat(String(value ?? '').trim());
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const parseMinutes = (value: unknown): number | null => {
+  const raw = String(value ?? '').trim();
+  if (!raw || raw === '--' || raw.toUpperCase() === 'DNP') return null;
+  if (raw.includes(':')) {
+    const parts = raw.split(':').map(Number);
+    return parts.length === 2 && parts.every(Number.isFinite) ? parts[0] + parts[1] / 60 : null;
+  }
+  return parseStatNumber(raw);
+};
+
+const madeValue = (value: unknown): number | null => {
+  if (value == null) return null;
+  const first = String(value).trim().split('-')[0];
+  return parseStatNumber(first);
+};
+
+type ScheduledContext = { waitUntil(promise: Promise<unknown>): void };
+type ScheduledControllerLike = { scheduledTime: number; cron: string };
+type WorkerHandler = {
+  fetch(request: Request, env: Env): Promise<Response>;
+  scheduled(controller: ScheduledControllerLike, env: Env, ctx: ScheduledContext): void;
+};
+
+const worker: WorkerHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return new Response(null, { headers: cors(env) });
@@ -102,12 +163,9 @@ export default {
     }
 
     if (url.pathname === '/api/health') return json({
-      app: 'EDGE NBA AI', version: '0.3.0', status: 'data-connectors-available',
-      providers: {
-        espn: 'public-endpoints-configured_not-yet-validated-in-production',
-        bigBallsData: env.BIGBALLSDATA_API_KEY ? 'secret-configured' : 'api-key-required-for-player-game-logs',
-        database: env.DB ? 'bound' : 'not-bound'
-      }, productionReady: false
+      app: 'EDGE NBA AI', version: '0.4.0', status: 'espn-only',
+      providers: { espn: 'public-endpoints-configured_not-yet-validated-in-production', database: env.DB ? 'bound' : 'not-bound' },
+      productionReady: false
     }, 200, env);
 
     if (url.pathname === '/api/espn/scoreboard') {
@@ -128,441 +186,283 @@ export default {
       try { return json({ source: 'ESPN', eventId: event, retrievedAt: new Date().toISOString(), data: await espn(`summary?event=${event}`, 30) }, 200, env, 'public, max-age=30'); }
       catch (e) { return json({ error: 'summary_unavailable', detail: String(e) }, 502, env); }
     }
-  if (url.pathname === '/api/bbd/matches') {
-    if (!env.BIGBALLSDATA_API_KEY) return json({ error: 'bigballsdata_key_missing' }, 503, env);
-    const now = new Date();
-    const end = new Date(now.getTime() + 48 * 60 * 60 * 1000);
-    const dates: string[] = [];
-    for (let d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())); d <= end; d.setUTCDate(d.getUTCDate() + 1)) dates.push(d.toISOString().slice(0, 10));
-    const cache = (caches as unknown as { default: Cache }).default;
-    const key = new Request(`https://edge-nba-cache.internal/bbd/matches-48h-${dates.join('-')}-${Math.floor(now.getTime()/60000)}`);
-    const cached = await cache.match(key);
-
-    const persistMatches = async (rows: Record<string, unknown>[]) => {
-      let saved = 0;
-      for (let i = 0; i < rows.length; i += 40) {
-        const statements = rows.slice(i, i + 40).map((m) => {
-          const home = m.home && typeof m.home === 'object' ? m.home as Record<string, unknown> : {};
-          const away = m.away && typeof m.away === 'object' ? m.away as Record<string, unknown> : {};
-          const gameId = String(m.id ?? m.match_id ?? '');
-          const seasonValue = Number(m.season);
-          const gameDate = String(m.game_date ?? '');
-          const homeId = String(home.id ?? '');
-          const awayId = String(away.id ?? '');
-          const status = String(m.status ?? 'unknown');
-          if (!gameId || !Number.isInteger(seasonValue) || !/^\d{4}-\d{2}-\d{2}$/.test(gameDate) || !homeId || !awayId) {
-            throw new Error(`Jogo com campos obrigatórios inválidos: ${gameId || 'sem ID'}`);
-          }
-          return env.DB.prepare(`
-            INSERT INTO games (game_id, season, game_date, home_team_id, away_team_id, status, source, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'bigballsdata', CURRENT_TIMESTAMP)
-            ON CONFLICT(game_id) DO UPDATE SET
-              season = excluded.season,
-              game_date = excluded.game_date,
-              home_team_id = excluded.home_team_id,
-              away_team_id = excluded.away_team_id,
-              status = excluded.status,
-              source = excluded.source,
-              fetched_at = CURRENT_TIMESTAMP
-          `).bind(gameId, seasonValue, gameDate, homeId, awayId, status);
-        });
-        if (statements.length) {
-          await env.DB.batch(statements);
-          saved += statements.length;
-        }
-      }
-      return saved;
-    };
-
-    if (cached) {
+    if (url.pathname === '/api/espn/games') {
+      if (!env.DB) return json({ error: 'd1_database_not_bound' }, 503, env);
+      const now = new Date();
+      const end = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+      const dates = new Set<string>();
+      for (const d of [now, end]) dates.add(d.toISOString().slice(0, 10).replace(/-/g, ''));
       try {
-        const payload = await cached.json() as { data?: Record<string, unknown>[]; meta?: Record<string, unknown> };
-        const complete = payload.meta?.complete === true;
-        const saved = complete ? await persistMatches(payload.data || []) : 0;
-        const body = JSON.stringify({ ...payload, meta: { ...payload.meta, d1_synced: complete && saved === (payload.data || []).length, d1_saved: saved } });
-        return new Response(body, { status: 200, headers: { ...cors(env), 'content-type': 'application/json', 'x-edge-cache': 'HIT' } });
-      } catch (error) { return json({ error: 'd1_match_sync_failed', detail: String(error) }, 500, env); }
-    }
-    try {
-      const found = new Map<string, Record<string, unknown>>();
-      const errors: string[] = []; let truncated = false;
-      for (const date of dates) {
-        for (let page = 1; page <= 10; page++) {
-          const u = new URL('https://api.bigballsdata.com/v1/matches');
-          u.searchParams.set('sport','basketball'); u.searchParams.set('league','nba'); u.searchParams.set('date',date); u.searchParams.set('limit','200'); u.searchParams.set('page',String(page));
-          const r = await fetch(u.toString(), { headers: { authorization: `Bearer ${env.BIGBALLSDATA_API_KEY}`, accept: 'application/json' } });
-          if (!r.ok) { errors.push(`${date}: HTTP ${r.status}`); break; }
-          const payload = await r.json() as { data?: unknown };
-          const rows = Array.isArray(payload.data) ? payload.data : [];
-          for (const item of rows) if (item && typeof item === 'object') { const m = item as Record<string, unknown>; const id = String(m.id ?? m.match_id ?? "");
-          const homeTeam = m.home && typeof m.home === 'object' ? m.home as Record<string, unknown> : {};
-          const awayTeam = m.away && typeof m.away === 'object' ? m.away as Record<string, unknown> : {};
-          const home = String(homeTeam.id ?? homeTeam.name ?? '').toLowerCase();
-          const away = String(awayTeam.id ?? awayTeam.name ?? '').toLowerCase();
-          const kickoff = String(m.kickoff_utc ?? m.start_time ?? m.starts_at ?? "");
-          const key = kickoff && home && away ? `${kickoff}|${[home, away].sort().join("|")}` : id;
-          if (key) found.set(key,m); }
-          if (rows.length < 200) break;
-          if (page === 10) truncated = true;
-        }
-      }
-      const time = (m: Record<string, unknown>) => new Date(String(m.kickoff_utc ?? m.start_time ?? m.starts_at ?? '')).getTime();
-      const data = Array.from(found.values()).filter(m => Number.isFinite(time(m)) && time(m) >= now.getTime() && time(m) <= end.getTime()).sort((x,y) => time(x)-time(y));
-      const complete = errors.length === 0 && !truncated;
-      const saved = complete ? await persistMatches(data) : 0;
-      const body = JSON.stringify({ data, meta: { window_hours: 48, timezone_display: 'Europe/Lisbon', window_start_utc: now.toISOString(), window_end_utc: end.toISOString(), dates_queried: dates, matches_count: data.length, complete, pagination_truncated: truncated, errors, d1_synced: complete && saved === data.length, d1_saved: saved } });
-      const response = new Response(body, { headers: { 'content-type':'application/json', 'cache-control':'public, max-age=30' } });
-      await cache.put(key,response);
-      return new Response(body, { headers: { 'content-type':'application/json', ...cors(env), 'x-edge-cache':'MISS' } });
-    } catch (error) { return json({ error:'bigballsdata_matches_unavailable', detail:String(error) },502,env); }
-  }
-
-
-    if (url.pathname === '/api/bbd/players') {
-      if (!env.BIGBALLSDATA_API_KEY) {
-        return json({ error: 'bigballsdata_key_missing' }, 503, env);
-      }
-      if (!env.DB) {
-        return json({ error: 'd1_database_not_bound' }, 503, env);
-      }
-
-      const season = 2026; // NBA 2026/27
-      const cache = (caches as unknown as { default: Cache }).default;
-      const cacheKey = new Request(`https://edge-nba-cache.internal/bbd/players-nba-season-${season}-v2`);
-
-      const officialTeams = new Set([
-        'Atlanta Hawks', 'Boston Celtics', 'Brooklyn Nets', 'Charlotte Hornets',
-        'Chicago Bulls', 'Cleveland Cavaliers', 'Dallas Mavericks', 'Denver Nuggets',
-        'Detroit Pistons', 'Golden State Warriors', 'Houston Rockets', 'Indiana Pacers',
-        'LA Clippers', 'Los Angeles Lakers', 'Memphis Grizzlies', 'Miami Heat',
-        'Milwaukee Bucks', 'Minnesota Timberwolves', 'New Orleans Pelicans',
-        'New York Knicks', 'Oklahoma City Thunder', 'Orlando Magic', 'Philadelphia 76ers',
-        'Phoenix Suns', 'Portland Trail Blazers', 'Sacramento Kings', 'San Antonio Spurs',
-        'Toronto Raptors', 'Utah Jazz', 'Washington Wizards'
-      ]);
-
-      type PlayerRow = {
-        id: string;
-        name: string;
-        position?: string | null;
-        jersey_number?: string | number | null;
-        headshot_url?: string | null;
-        team?: { id?: string | number | null; name?: string | null } | null;
-      };
-
-      const savePlayers = async (rows: PlayerRow[]) => {
-        let saved = 0;
-        for (let i = 0; i < rows.length; i += 25) {
-          const chunk = rows.slice(i, i + 25);
-          const statements = chunk.flatMap((player) => {
-            const teamId = player.team?.id == null ? null : String(player.team.id);
-            const teamName = player.team?.name ?? null;
-            return [
-              env.DB!.prepare(`
-                INSERT INTO players (player_id, name, team_id, position, updated_at)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(player_id) DO UPDATE SET
-                  name = excluded.name,
-                  team_id = excluded.team_id,
-                  position = excluded.position,
-                  updated_at = CURRENT_TIMESTAMP
-              `).bind(
-                player.id,
-                player.name,
-                teamId,
-                player.position ?? null
-              ),
-              env.DB!.prepare(`
-                INSERT INTO player_seasons (player_id, season, team_id, team_name)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(player_id, season) DO UPDATE SET
-                  team_id = excluded.team_id,
-                  team_name = excluded.team_name
-              `).bind(player.id, season, teamId, teamName)
-            ];
-          });
-          await env.DB.batch(statements);
-          saved += chunk.length;
-        }
-        return saved;
-      };
-
-      // A cache hit may speed up the API response, but it must never bypass D1 sync.
-      const cached = await cache.match(cacheKey);
-      if (cached) {
-        try {
-          const cachedPayload = await cached.json() as {
-            data?: PlayerRow[];
-            meta?: { complete?: boolean };
-          };
-          if (cachedPayload.meta?.complete === true && Array.isArray(cachedPayload.data)) {
-            const saved = await savePlayers(cachedPayload.data);
-            return json({
-              ...cachedPayload,
-              meta: { ...cachedPayload.meta, d1_synced: true, d1_saved: saved, cache: 'HIT' }
-            }, 200, env);
-          }
-        } catch (error) {
-          // Ignore malformed/stale cache and rebuild from the source below.
-          console.warn('Cache de jogadores ignorada:', String(error));
-        }
-      }
-
-      const players = new Map<string, PlayerRow>();
-      const teams = new Set<string>();
-      const errors: string[] = [];
-      let total = -1;
-      let fetched = 0;
-      let offset = 0;
-
-      while (total < 0 || offset < total) {
-        const upstreamUrl = new URL('https://api.bigballsdata.com/v1/stored/players');
-        upstreamUrl.searchParams.set('league', 'nba');
-        upstreamUrl.searchParams.set('limit', '50');
-        upstreamUrl.searchParams.set('offset', String(offset));
-
-        try {
-          const upstream = await fetch(upstreamUrl.toString(), {
-            headers: {
-              authorization: `Bearer ${env.BIGBALLSDATA_API_KEY}`,
-              accept: 'application/json'
-            }
-          });
-          if (!upstream.ok) {
-            errors.push(`offset ${offset}: HTTP ${upstream.status}`);
-            break;
-          }
-
-          const payload = await upstream.json() as {
-            data?: Record<string, unknown>[];
-            pagination?: { total?: number };
-          };
-          const pageRows = Array.isArray(payload.data) ? payload.data : [];
-          const pageTotal = Number(payload.pagination?.total);
-
-          if (!Number.isInteger(pageTotal) || pageTotal < 0) {
-            errors.push(`offset ${offset}: total inválido`);
-            break;
-          }
-          if (total < 0) total = pageTotal;
-          else if (pageTotal !== total) {
-            errors.push('O total da API mudou durante a recolha');
-            break;
-          }
-          if (pageRows.length === 0 && offset < total) {
-            errors.push(`Página vazia antes do fim: offset ${offset}`);
-            break;
-          }
-
-          for (const raw of pageRows) {
-            fetched++;
-            const team = raw.team && typeof raw.team === 'object'
-              ? raw.team as { id?: string | number | null; name?: string | null }
-              : null;
-            const id = String(raw.id ?? '').trim();
-            const name = String(raw.name ?? '').trim();
-            const teamName = String(team?.name ?? raw.team_name ?? '').trim();
-            if (!id || !name) {
-              errors.push('Jogador sem ID ou nome');
-              continue;
-            }
-            if (!officialTeams.has(teamName)) {
-              errors.push(`Equipa não reconhecida: ${teamName || 'sem equipa'}`);
-              continue;
-            }
-            teams.add(teamName);
-            players.set(id, {
-              id,
-              name,
-              position: raw.position == null ? null : String(raw.position),
-              jersey_number: raw.jersey_number == null ? null : String(raw.jersey_number),
-              headshot_url: raw.headshot_url == null ? null : String(raw.headshot_url),
-              team: { id: team?.id ?? null, name: teamName }
+        const found = new Map<string, any>();
+        for (const date of dates) {
+          const board: any = await espn(`scoreboard?dates=${date}`, 60);
+          for (const event of board.events || []) {
+            const kickoff = new Date(event.date || event.competitions?.[0]?.date || '');
+            if (!Number.isFinite(kickoff.getTime()) || kickoff < now || kickoff > end) continue;
+            const competition = event.competitions?.[0];
+            const competitors = competition?.competitors || [];
+            const home = competitors.find((team: any) => team.homeAway === 'home') || competitors[0];
+            const away = competitors.find((team: any) => team.homeAway === 'away') || competitors[1];
+            if (!home?.team?.id || !away?.team?.id) continue;
+            found.set(String(event.id), {
+              id: String(event.id), date: kickoff.toISOString(), game_date: kickoff.toISOString().slice(0, 10),
+              home_team_id: String(home.team.id), away_team_id: String(away.team.id),
+              home_team: home.team.displayName || home.team.name || '',
+              away_team: away.team.displayName || away.team.name || '',
+              status: event.status?.type?.description || event.status?.type?.name || 'scheduled'
             });
           }
-
-          offset += pageRows.length;
-          if (pageRows.length < 50 && offset < total) {
-            errors.push('Página incompleta antes do total anunciado');
-            break;
-          }
-        } catch (error) {
-          errors.push(`offset ${offset}: ${String(error)}`);
-          break;
         }
-      }
-
-      const playerList = Array.from(players.values());
-      const complete = errors.length === 0 &&
-        total >= 0 && fetched === total && playerList.length === total && teams.size === 30;
-
-      // Persist every valid player collected, even when the upstream scan is partial.
-      // Completeness describes source coverage; it must not control whether valid rows
-      // are written to D1.
-      let d1Saved = 0;
-      if (playerList.length > 0) {
-        try {
-          d1Saved = await savePlayers(playerList);
-        } catch (error) {
-          // Emit the underlying D1 exception in Worker logs so the failing
-          // SQL statement can be identified from `wrangler tail`.
-          console.error('D1_PLAYER_SYNC_FAILED', error);
-          return json({
-            error: 'd1_player_sync_failed',
-            detail: error instanceof Error
-              ? `${error.name}: ${error.message}`
-              : String(error),
-            meta: {
-              total_api: total,
-              total_fetched: fetched,
-              total_unique: playerList.length,
-              teams_found: teams.size,
-              complete,
-              errors,
-              d1_synced: false,
-              d1_saved: 0
-            }
-          }, 500, env);
+        const games = Array.from(found.values()).sort((a, b) => a.date.localeCompare(b.date));
+        if (games.length) {
+          const statements = games.map(game => env.DB.prepare(`
+            INSERT INTO games (game_id, season, game_date, home_team, away_team, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(game_id) DO UPDATE SET game_date=excluded.game_date,
+              home_team=excluded.home_team, away_team=excluded.away_team, status=excluded.status
+          `).bind(game.id, Number(game.game_date.slice(5, 7)) >= 7 ? Number(game.game_date.slice(0, 4)) : Number(game.game_date.slice(0, 4)) - 1, game.game_date, game.home_team, game.away_team, game.status));
+          for (let i = 0; i < statements.length; i += 50) await env.DB.batch(statements.slice(i, i + 50));
         }
-      }
-
-      const body = {
-        sport: 'basketball',
-        league: 'NBA',
-        data: playerList,
-        meta: {
-          total_api: total,
-          total_fetched: fetched,
-          total_unique: playerList.length,
-          teams_found: teams.size,
-          teams: Array.from(teams).sort(),
-          complete,
-          errors,
-          d1_synced: playerList.length > 0 && d1Saved === playerList.length,
-          d1_saved: d1Saved,
-          cache: 'MISS'
-        }
-      };
-
-      if (complete && d1Saved === playerList.length) {
-        await cache.put(cacheKey, new Response(JSON.stringify(body), {
-          headers: { 'content-type': 'application/json', 'cache-control': 'max-age=21600' }
-        }));
-      }
-      return json(body, 200, env);
+        return json({ source: 'ESPN', data: games, meta: { window_hours: 24, window_start: now.toISOString(), window_end: end.toISOString(), games_count: games.length, d1_saved: games.length } }, 200, env, 'private, max-age=30');
+      } catch (error) { return json({ error: 'espn_games_unavailable', detail: String(error) }, 502, env); }
     }
-if (url.pathname === '/api/espn/sync-player-ids') {
-    const teamIds = Array.from({ length: 30 }, (_, i) => i + 1);
+
+    if (url.pathname === '/api/espn/players' || url.pathname === '/api/espn/sync-player-ids') {
+      if (!env.DB) return json({ error: 'd1_database_not_bound' }, 503, env);
+      const season = nbaSeasonForDate();
       const errors: string[] = [];
-        const matches: any[] = [];
-          let rostersRead = 0;
-            let athletesRead = 0;
+      let teamIds: string[] = [];
+      try {
+        const index: any = await espn('teams?limit=100', 21600);
+        teamIds = espnTeamIdsFromIndex(index);
+      } catch (error) {
+        return json({ error: 'espn_teams_index_failed', detail: String(error) }, 502, env);
+      }
+      if (!teamIds.length) return json({ error: 'espn_teams_index_empty', detail: 'A ESPN não devolveu IDs de equipas válidos.' }, 502, env);
+      let rostersRead = 0;
+      let athletesRead = 0;
+      let savedPlayers = 0;
+      let mappedHistorical = 0;
+      const normalize = (value: string) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      try {
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS player_seasons (player_id TEXT NOT NULL, season INTEGER NOT NULL, team_id TEXT, team_name TEXT, PRIMARY KEY (player_id, season))`).run();
+        // Não recriar a tabela: a migração existente não inclui matched_by.
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS player_source_ids (player_id TEXT NOT NULL, source TEXT NOT NULL, source_player_id TEXT NOT NULL, season INTEGER NOT NULL, verified INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (player_id, source, season))`).run();
+        const dbResult = await env.DB.prepare('SELECT p.player_id, p.name, ps.team_name FROM players p LEFT JOIN player_seasons ps ON ps.player_id=p.player_id AND ps.season=?').bind(season).all();
+        const existing = (dbResult.results || []) as any[];
+        const existingByNameTeam = new Map<string, any[]>();
+        for (const player of existing) {
+          const key = `${normalize(String(player.name || ''))}|${normalize(String(player.team_name || ''))}`;
+          const list = existingByNameTeam.get(key) || [];
+          list.push(player);
+          existingByNameTeam.set(key, list);
+        }
+        const inserts: any[] = [];
+        const mappings: any[] = [];
+        for (const teamId of teamIds) {
+          try {
+            const roster: any = await espn(`teams/${teamId}/roster`, 21600);
+            const teamName = String(roster.team?.displayName || '').trim();
+            const athletes = Array.isArray(roster.athletes) ? roster.athletes : [];
+            if (!teamName) { errors.push(`Roster ESPN ${teamId}: nome de equipa ausente`); continue; }
+            rostersRead++;
+            for (const athlete of athletes) {
+              athletesRead++;
+              const espnId = String(athlete.id || '').trim();
+              const name = String(athlete.displayName || athlete.fullName || '').trim();
+              if (!espnId || !name) continue;
+              const key = `${normalize(name)}|${normalize(teamName)}`;
+              const candidates = existingByNameTeam.get(key) || [];
+              const legacy = candidates.length === 1 ? candidates[0] : null;
+              const internalId = legacy ? String(legacy.player_id) : espnId;
+              const position = athlete.position?.abbreviation || athlete.position?.name || null;
+              const teamEspnId = String(roster.team?.id || teamId);
+              inserts.push(env.DB.prepare(`INSERT INTO players (player_id,name,team_id,position,updated_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(player_id) DO UPDATE SET name=excluded.name,team_id=excluded.team_id,position=excluded.position,updated_at=CURRENT_TIMESTAMP`).bind(internalId, name, teamEspnId, position));
+              inserts.push(env.DB.prepare(`INSERT INTO player_seasons (player_id,season,team_id,team_name) VALUES (?,?,?,?) ON CONFLICT(player_id,season) DO UPDATE SET team_id=excluded.team_id,team_name=excluded.team_name`).bind(internalId, season, teamEspnId, teamName));
+              mappings.push(env.DB.prepare(`INSERT INTO player_source_ids (player_id,source,source_player_id,season,verified,updated_at) VALUES (?,'ESPN',?,?,1,CURRENT_TIMESTAMP) ON CONFLICT(player_id,source,season) DO UPDATE SET source_player_id=excluded.source_player_id,verified=1,updated_at=CURRENT_TIMESTAMP`).bind(internalId, espnId, season));
+              if (legacy) mappedHistorical++;
+              savedPlayers++;
+            }
+          } catch (error) { errors.push(`Roster ESPN ${teamId}: ${String(error)}`); }
+        }
+        const allStatements = [...inserts, ...mappings];
+        for (let i = 0; i < allStatements.length; i += 50) await env.DB.batch(allStatements.slice(i, i + 50));
+        return json({ success: errors.length === 0, source: 'ESPN', season, espn_rosters_read: rostersRead, espn_athletes_read: athletesRead, players_processed: savedPlayers, historical_ids_mapped: mappedHistorical, errors }, 200, env);
+      } catch (error) { return json({ error: 'espn_player_sync_failed', detail: String(error), errors }, 500, env); }
+    }
 
-              const normalize = (value: string) =>
-                  value.normalize('NFD')
-                        .replace(/[\u0300-\u036f]/g, '')
-                              .toLowerCase()
-                                    .replace(/[^a-z0-9]/g, '');
 
-                                      const dbResult = await env.DB.prepare(
-                                          'SELECT p.player_id, p.name AS name, ps.team_name FROM players p JOIN player_seasons ps ON ps.player_id = p.player_id WHERE ps.season = 2026'
-                                            ).all();
+    // Inicia o backfill automático sem repor um cursor já guardado na mesma época.
+    if (url.pathname === '/api/espn/backfill/start' && (request.method === 'POST' || request.method === 'GET')) {
+      if (!env.DB) return json({ error: 'd1_database_not_bound' }, 503, env);
+      const season = nbaSeasonForDate();
+      const start = new Date(Date.UTC(season, 9, 1));
+      const today = new Date();
+      const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+      const totalDays = Math.max(0, Math.floor((todayUtc.getTime() - start.getTime()) / 86400000) + 1);
+      try {
+        await env.DB.prepare(`CREATE TABLE IF NOT EXISTS espn_backfill_state (id INTEGER PRIMARY KEY CHECK(id=1), season INTEGER NOT NULL, next_offset INTEGER NOT NULL DEFAULT 0, total_days INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'running', locked_until INTEGER, last_result TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)`).run();
+        await env.DB.prepare(`INSERT INTO espn_backfill_state (id,season,next_offset,total_days,status,locked_until,last_result,updated_at) VALUES (1,?,0,?,'running',NULL,NULL,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET next_offset=CASE WHEN espn_backfill_state.season=excluded.season THEN espn_backfill_state.next_offset ELSE 0 END, total_days=excluded.total_days, status=CASE WHEN espn_backfill_state.season=excluded.season THEN espn_backfill_state.status ELSE 'running' END, locked_until=CASE WHEN espn_backfill_state.season=excluded.season THEN espn_backfill_state.locked_until ELSE NULL END, last_result=CASE WHEN espn_backfill_state.season=excluded.season THEN espn_backfill_state.last_result ELSE NULL END, season=excluded.season, updated_at=CURRENT_TIMESTAMP`).bind(season,totalDays).run();
+        const state = await env.DB.prepare(`SELECT season,next_offset,total_days,status FROM espn_backfill_state WHERE id=1`).first() as any;
+        return json({ success: true, ...state, cadence: 'um dia por execução diária' }, 200, env);
+      } catch (error) { return json({ error: 'backfill_start_failed', detail: String(error) }, 500, env); }
+    }
 
-                                              const dbPlayers = dbResult.results ?? [];
-                                                const playerMap = new Map<string, any[]>();
+    if (url.pathname === '/api/espn/backfill/status') {
+      try {
+        const state = await env.DB.prepare(`SELECT season,next_offset,total_days,status,last_result,updated_at FROM espn_backfill_state WHERE id=1`).first();
+        return json({ success: true, backfill: state || null }, 200, env);
+      } catch (error) { return json({ success: false, error: 'backfill_not_started', detail: String(error) }, 200, env); }
+    }
 
-                                                  for (const p of dbPlayers as any[]) {
-                                                      const key = `${normalize(String(p.name))}|${normalize(String(p.team_name))}`;
-                                                          const list = playerMap.get(key) ?? [];
-                                                              list.push(p);
-                                                                  playerMap.set(key, list);
-                                                                    }
+    // Backfill incremental por datas e boxscores oficiais ESPN (não usa athlete gamelog, que devolve HTTP 403).
+    if (url.pathname === '/api/espn/backfill') {
+      if (!env.DB) return json({ error: 'd1_database_not_bound' }, 503, env);
+      const season = Number(url.searchParams.get('season') || nbaSeasonForDate());
+      const offset = Math.max(0, Number(url.searchParams.get('offset') || 0));
+      const days = Math.min(7, Math.max(1, Number(url.searchParams.get('days') || 7)));
+      if (!Number.isInteger(season) || season !== nbaSeasonForDate() || !Number.isInteger(offset) || !Number.isInteger(days)) {
+        return json({ error: 'Parâmetros inválidos. O backfill aceita a época atual, offset em dias e lotes até 7 dias.' }, 400, env);
+      }
+      try {
+        const start = new Date(Date.UTC(season, 9, 1)); // início operacional do backfill: 1 de outubro.
+        const today = new Date();
+        const todayUtc = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+        const totalDays = Math.max(0, Math.floor((todayUtc.getTime() - start.getTime()) / 86400000) + 1);
+        const endOffset = Math.min(offset + days, totalDays);
+        const ids = await env.DB.prepare(
+          "SELECT source_player_id,player_id FROM player_source_ids WHERE source='ESPN' AND season=? AND verified=1"
+        ).bind(season).all();
+        const playerMap = new Map<string, string>((ids.results || []).map((x: any) => [String(x.source_player_id), String(x.player_id)]));
+        if (playerMap.size === 0) {
+          return json({ success: false, error: 'espn_player_mappings_missing', detail: 'Não existem IDs ESPN verificados para esta época; sincroniza os plantéis antes de avançar o backfill.', mappings_available: 0 }, 409, env);
+        }
+        const gameRows = new Map<string, any>();
+        const statRows = new Map<string, any>();
+        const errors: string[] = [];
+        let datesChecked = 0;
+        let gamesSeen = 0;
+        let completedGames = 0;
+        for (let dayOffset = offset; dayOffset < endOffset; dayOffset++) {
+          const dateObj = new Date(start.getTime() + dayOffset * 86400000);
+          const date = dateObj.toISOString().slice(0, 10).replace(/-/g, '');
+          datesChecked++;
+          let board: any;
+          try { board = await espn(`scoreboard?dates=${date}`, 3600); }
+          catch (e) { errors.push(`${date} scoreboard: ${String(e)}`); continue; }
+          const events = Array.isArray(board?.events) ? board.events : [];
+          gamesSeen += events.length;
+          for (const event of events) {
+            if (event?.status?.type?.completed !== true) continue;
+            const eventId = String(event.id || '');
+            const competition = event.competitions?.[0];
+            const competitors = competition?.competitors || [];
+            if (!/^\d+$/.test(eventId) || competitors.length < 2) continue;
+            const home = competitors.find((x: any) => x.homeAway === 'home') || competitors[0];
+            const away = competitors.find((x: any) => x.homeAway === 'away') || competitors[1];
+            const homeName = String(home?.team?.displayName || home?.team?.name || '');
+            const awayName = String(away?.team?.displayName || away?.team?.name || '');
+            const isoDate = dateObj.toISOString().slice(0, 10);
+            gameRows.set(eventId, { id: eventId, date: isoDate, home: homeName, away: awayName, status: event.status?.type?.description || 'Final' });
+            try {
+              const summary: any = await espn(`summary?event=${eventId}`, 86400);
+              const teams = Array.isArray(summary?.boxscore?.players) ? summary.boxscore.players : [];
+              if (!teams.length) { errors.push(`${eventId}: boxscore ausente`); continue; }
+              completedGames++;
+              for (const team of teams) {
+                const teamId = String(team?.team?.id || '');
+                const opponent = String(competitors.find((x: any) => String(x.team?.id || '') !== teamId)?.team?.displayName || '');
+                for (const group of team.statistics || []) {
+                  const labels: string[] = (group.labels || group.names || []).map((x: unknown) => String(x).toUpperCase());
+                  for (const item of group.athletes || []) {
+                    const athleteId = String(item?.athlete?.id || '');
+                    const playerId = playerMap.get(athleteId);
+                    if (!playerId) continue;
+                    const values = Array.isArray(item.stats) ? item.stats : [];
+                    const stat: Record<string, unknown> = {};
+                    labels.forEach((label, index) => { stat[label.replace(/[^A-Z0-9]/g, '')] = values[index]; });
+                    const minRaw = stat.MIN ?? stat.MINUTES;
+                    const minutes = parseMinutes(minRaw);
+                    if (minutes === null) continue;
+                    const pair = (value: unknown): [number | null, number | null] => {
+                      const parts = String(value ?? '').split('-');
+                      return [parseStatNumber(parts[0]), parseStatNumber(parts[1])];
+                    };
+                    const [fgm, fga] = pair(stat.FG);
+                    const [tpm, tpa] = pair(stat['3PT']);
+                    const key = `${playerId}:${eventId}`;
+                    statRows.set(key, {
+                      playerId, eventId, season, date: isoDate, opponent: opponent || null, minutes,
+                      points: parseStatNumber(stat.PTS), rebounds: parseStatNumber(stat.REB), assists: parseStatNumber(stat.AST),
+                      steals: parseStatNumber(stat.STL), blocks: parseStatNumber(stat.BLK), turnovers: parseStatNumber(stat.TO ?? stat.TOV),
+                      threes: tpm, fgm, fga, tpa
+                    });
+                  }
+                }
+              }
+            } catch (e) { errors.push(`${eventId} summary: ${String(e)}`); }
+          }
+        }
+        const gameStatements = Array.from(gameRows.values()).map(game => env.DB.prepare(
+          `INSERT INTO games (game_id,season,game_date,home_team,away_team,status) VALUES (?,?,?,?,?,?)
+           ON CONFLICT(game_id) DO UPDATE SET game_date=excluded.game_date,home_team=excluded.home_team,away_team=excluded.away_team,status=excluded.status`
+        ).bind(game.id, season, game.date, game.home, game.away, game.status));
+        const statStatements = Array.from(statRows.values()).map(row => env.DB.prepare(
+          `INSERT INTO player_game_stats
+           (player_id,game_id,season,game_date,opponent,minutes,points,rebounds,assists,steals,blocks,turnovers,three_pointers_made,field_goals_made,field_goals_attempted,three_pointers_attempted)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(player_id,game_id,season) DO UPDATE SET game_date=excluded.game_date,opponent=excluded.opponent,minutes=excluded.minutes,
+           points=excluded.points,rebounds=excluded.rebounds,assists=excluded.assists,steals=excluded.steals,blocks=excluded.blocks,
+           turnovers=excluded.turnovers,three_pointers_made=excluded.three_pointers_made,field_goals_made=excluded.field_goals_made,
+           field_goals_attempted=excluded.field_goals_attempted,three_pointers_attempted=excluded.three_pointers_attempted,updated_at=CURRENT_TIMESTAMP`
+        ).bind(row.playerId,row.eventId,row.season,row.date,row.opponent,row.minutes,row.points,row.rebounds,row.assists,row.steals,row.blocks,row.turnovers,row.threes,row.fgm,row.fga,row.tpa));
+        for (let i = 0; i < gameStatements.length; i += 50) await env.DB.batch(gameStatements.slice(i, i + 50));
+        for (let i = 0; i < statStatements.length; i += 50) await env.DB.batch(statStatements.slice(i, i + 50));
+        return json({ success: errors.length === 0, source: 'ESPN scoreboard + game summaries', internal_season: season,
+          range: { start: new Date(start.getTime() + offset * 86400000).toISOString().slice(0,10), days_checked: datesChecked, next_offset: endOffset, total_days: totalDays, complete: endOffset >= totalDays },
+          mappings_available: playerMap.size, games_seen: gamesSeen, completed_games_with_boxscore: completedGames,
+          games_upserted: gameRows.size, player_game_stats_upserted: statRows.size, errors }, 200, env);
+      } catch (error) { return json({ error: 'espn_backfill_failed', detail: String(error) }, 500, env); }
+    }
 
-                                                                      for (const teamId of teamIds) {
-                                                                          try {
-                                                                                const response = await fetch(
-                                                                                        `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/${teamId}/roster`
-                                                                                              );
+    if (url.pathname === '/api/espn/player-search') {
+      if (!env.DB) return json({ error: 'd1_database_not_bound' }, 503, env);
+      const query = (url.searchParams.get('name') || '').trim();
+      if (query.length < 2 || query.length > 80) return json({ error: 'Indica pelo menos 2 caracteres.' }, 400, env);
+      try {
+        const rows = await env.DB.prepare(`SELECT p.player_id AS id,p.name,ps.team_name,p.position FROM players p LEFT JOIN player_seasons ps ON ps.player_id=p.player_id AND ps.season=? WHERE lower(p.name) LIKE ? ORDER BY p.name LIMIT 30`).bind(nbaSeasonForDate(), `%${query.toLowerCase()}%`).all();
+        return json({ source: 'ESPN / D1', data: rows.results || [] }, 200, env, 'private, max-age=60');
+      } catch (error) { return json({ error: 'espn_player_search_failed', detail: String(error) }, 500, env); }
+    }
 
-                                                                                                    if (!response.ok) {
-                                                                                                            errors.push(`Equipa ESPN ${teamId}: HTTP ${response.status}`);
-                                                                                                                    continue;
-                                                                                                                          }
+    if (url.pathname === '/api/espn/player-gamelog') {
+      if (!env.DB) return json({ error: 'd1_database_not_bound' }, 503, env);
+      const playerId = url.searchParams.get('playerId') || '';
+      const season = Number(url.searchParams.get('season') || nbaSeasonForDate());
+      if (!playerId || playerId.length > 80 || !Number.isInteger(season)) return json({ error: 'Parâmetros inválidos.' }, 400, env);
+      try {
+        const rows = await env.DB.prepare(`SELECT game_date AS date,minutes,points,rebounds,assists,three_pointers_made AS threes FROM player_game_stats WHERE player_id=? AND season=? ORDER BY game_date DESC`).bind(playerId,season).all();
+        return json({ source: 'ESPN / Cloudflare D1', data: rows.results || [], meta: { sample: (rows.results || []).length, season } }, 200, env, 'private, max-age=60');
+      } catch (error) { return json({ error: 'espn_gamelog_failed', detail: String(error) }, 500, env); }
+    }
 
-                                                                                                                                const payload: any = await response.json();
-                                                                                                                                      const teamName = String(payload.team?.displayName ?? '').trim();
-                                                                                                                                            const athletes = payload.athletes ?? [];
+    if (url.pathname === '/api/espn/player-gamelogs' && request.method === 'POST') {
+      if (!env.DB) return json({ error: 'd1_database_not_bound' }, 503, env);
+      let body: { playerIds?: unknown; season?: number };
+      try { body = await request.json() as { playerIds?: unknown; season?: number }; } catch { return json({ error: 'invalid_json' }, 400, env); }
+      const ids = Array.isArray(body.playerIds) ? [...new Set(body.playerIds.filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 80))].slice(0,20) : [];
+      const season = Number(body.season || nbaSeasonForDate());
+      if (!ids.length || !Number.isInteger(season)) return json({ error: 'Indica IDs e época válidos.' }, 400, env);
+      try {
+        const results = [];
+        for (const playerId of ids) {
+          const rows = await env.DB.prepare(`SELECT game_date AS date,minutes,points,rebounds,assists,three_pointers_made AS threes FROM player_game_stats WHERE player_id=? AND season=? ORDER BY game_date DESC LIMIT 100`).bind(playerId,season).all();
+          results.push({ playerId, data: rows.results || [] });
+        }
+        return json({ source: 'ESPN / Cloudflare D1', results }, 200, env, 'private, max-age=30');
+      } catch (error) { return json({ error: 'espn_gamelogs_failed', detail: String(error) }, 500, env); }
+    }
 
-                                                                                                                                                  if (!teamName || !Array.isArray(athletes)) {
-                                                                                                                                                          errors.push(`Resposta inválida na equipa ESPN ${teamId}`);
-                                                                                                                                                                  continue;
-                                                                                                                                                                        }
-
-                                                                                                                                                                              rostersRead++;
-
-                                                                                                                                                                                    for (const athlete of athletes) {
-                                                                                                                                                                                            athletesRead++;
-
-                                                                                                                                                                                                    const espnId = String(athlete.id ?? '').trim();
-                                                                                                                                                                                                            const name = String(athlete.displayName ?? '').trim();
-
-                                                                                                                                                                                                                    if (!espnId || !name) continue;
-
-                                                                                                                                                                                                                            const key = `${normalize(name)}|${normalize(teamName)}`;
-                                                                                                                                                                                                                                    const candidates = playerMap.get(key) ?? [];
-
-                                                                                                                                                                                                                                            if (candidates.length !== 1) continue;
-
-                                                                                                                                                                                                                                                    matches.push({
-                                                                                                                                                                                                                                                              player_id: candidates[0].player_id,
-                                                                                                                                                                                                                                                                        source: 'espn',
-                                                                                                                                                                                                                                                                                  source_player_id: espnId,
-                                                                                                                                                                                                                                                                                            team_id: null,
-                                                                                                                                                                                                                                                                                                      team_name: teamName,
-                                                                                                                                                                                                                                                                                                                matched_name: name,
-                                                                                                                                                                                                                                                                                                                          match_method: 'exact_name_team'
-                                                                                                                                                                                                                                                                                                                                  });
-                                                                                                                                                                                                                                                                                                                                        }
-                                                                                                                                                                                                                                                                                                                                            } catch (error) {
-                                                                                                                                                                                                                                                                                                                                                  errors.push(`Equipa ESPN ${teamId}: ${String(error)}`);
-                                                                                                                                                                                                                                                                                                                                                      }
-                                                                                                                                                                                                                                                                                                                                                        }
-
-                                                                                                                                                                                                                                                                                                                                                          let saved = 0;
-
-                                                                                                                                                                                                                                                                                                                                                            for (let i = 0; i < matches.length; i += 25) {
-                                                                                                                                                                                                                                                                                                                                                                const chunk = matches.slice(i, i + 25);
-
-                                                                                                                                                                                                                                                                                                                                                                    const statements = chunk.map((m: any) =>
-                                                                                                                                                                                                                                                                                                                                                                          env.DB.prepare(`
-                                                                                                                                                                                                                                                                                                                                                                                  INSERT INTO player_source_ids
-        (player_id, source, source_player_id, season, matched_by, verified)
-        VALUES (?, ?, ?, 2026, 'exact_name_team', 1)
-        ON CONFLICT(player_id, source, season) DO UPDATE SET
-        source_player_id = excluded.source_player_id,
-        season = excluded.season,
-        matched_by = excluded.matched_by,
-        verified = 1,
-        updated_at = CURRENT_TIMESTAMP
-                                                                                                                                                                                                                                                                                                                                                                                                                `).bind(m.player_id, m.source, m.source_player_id)
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  );
-
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      const results = await env.DB.batch(statements);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          saved += results.reduce((sum: number, r: any) => sum + (r.meta?.changes ?? 0), 0);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            }
-
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              return json({
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  success: errors.length === 0,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      season: 2026,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          bbd_players: dbPlayers.length,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              espn_rosters_read: rostersRead,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  espn_athletes_read: athletesRead,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      exact_matches: matches.length,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          saved,
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              errors
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                }, 200, env);
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
-}
     if (url.pathname === '/api/scan/players') {
       if (!env.DB) return json({ error: 'd1_database_not_bound' }, 503, env);
       const teams = Array.from(new Set((url.searchParams.get('teams') || '')
@@ -572,132 +472,81 @@ if (url.pathname === '/api/espn/sync-player-ids') {
       }
       const placeholders = teams.map(() => '?').join(',');
       try {
+        // Considerar os últimos jogos efetivamente disputados em 2025/26 e 2026/27.
+        // Lesões/suspensões não são critério de exclusão: o frontend anexa o estado ESPN.
+        // A elegibilidade vem da utilização histórica, incluindo jogos anteriores à lesão.
         const result = await env.DB.prepare(`
-          SELECT p.player_id AS id, p.name AS name, ps.team_name, p.position
+          WITH ranked_minutes AS (
+            SELECT
+              s.player_id,
+              s.minutes,
+              ROW_NUMBER() OVER (PARTITION BY s.player_id ORDER BY g.game_date DESC, g.game_id DESC) AS rn
+            FROM player_game_stats s
+            JOIN games g ON g.game_id = s.game_id
+            WHERE g.season IN (?, ?)
+              AND s.minutes IS NOT NULL
+              AND s.minutes > 0
+          ), rotation AS (
+            SELECT
+              player_id,
+              COUNT(*) AS appearances,
+              AVG(minutes) AS avg_minutes,
+              AVG(CASE WHEN rn <= 10 THEN minutes END) AS recent10_avg_minutes,
+              SUM(CASE WHEN rn <= 10 THEN 1 ELSE 0 END) AS recent10_appearances
+            FROM ranked_minutes
+            GROUP BY player_id
+          )
+          SELECT
+            p.player_id AS id,
+            p.name AS name,
+            ps.team_name,
+            p.position,
+            COALESCE(r.appearances, 0) AS rotation_games,
+            COALESCE(r.avg_minutes, 0) AS avg_minutes,
+            COALESCE(r.recent10_avg_minutes, 0) AS recent10_avg_minutes,
+            COALESCE(r.recent10_appearances, 0) AS recent10_appearances,
+            CASE WHEN COALESCE(r.appearances, 0) >= 3
+              AND (COALESCE(r.recent10_avg_minutes, 0) >= 8 OR COALESCE(r.avg_minutes, 0) >= 12)
+              THEN 1 ELSE 0 END AS rotation_eligible
           FROM players p
           JOIN player_seasons ps ON ps.player_id = p.player_id
-          WHERE ps.season = 2026 AND ps.team_name IN (${placeholders})
-          ORDER BY ps.team_name, p.name
-        `).bind(...teams).all();
+          LEFT JOIN rotation r ON r.player_id = p.player_id
+          WHERE ps.season = ? AND ps.team_name IN (${placeholders})
+          ORDER BY rotation_eligible DESC, ps.team_name, p.name
+        `).bind(nbaSeasonForDate() - 1, nbaSeasonForDate(), nbaSeasonForDate(), ...teams).all();
         const players = (result.results || []).map((row: Record<string, unknown>) => ({
           id: String(row.id),
           name: String(row.name),
           team_name: String(row.team_name),
           position: row.position == null ? null : String(row.position),
+          rotation_games: Number(row.rotation_games) || 0,
+          avg_minutes: Number(row.avg_minutes) || 0,
+          recent10_avg_minutes: Number(row.recent10_avg_minutes) || 0,
+          recent10_appearances: Number(row.recent10_appearances) || 0,
+          rotation_eligible: Number(row.rotation_eligible) === 1,
           headshot_url: null
         }));
         const foundTeams = Array.from(new Set(players.map((player: { team_name: string }) => player.team_name))).sort();
         return json({
-          source: 'Cloudflare D1 / BigBallsData',
-          season: 2026,
+          source: 'Cloudflare D1 / ESPN',
+          season: nbaSeasonForDate(),
           requested_teams: teams,
           found_teams: foundTeams,
           missing_teams: teams.filter(team => !foundTeams.includes(team)),
           players,
-          meta: { players_count: players.length, teams_requested: teams.length, teams_found: foundTeams.length }
+          meta: { players_count: players.length, rotation_count: players.filter((player: { rotation_eligible: boolean }) => player.rotation_eligible).length, teams_requested: teams.length, teams_found: foundTeams.length }
         }, 200, env, 'private, max-age=300');
       } catch (error) {
         return json({ error: 'scan_players_query_failed', detail: String(error) }, 500, env);
       }
     }
 
-    if (url.pathname === '/api/bbd/player-search') {
-      if (!env.BIGBALLSDATA_API_KEY) return json({ error: 'bigballsdata_key_missing', message: 'Configura BIGBALLSDATA_API_KEY como secret no Worker.' }, 503, env);
-      const name = url.searchParams.get('name')?.trim();
-      if (!name || name.length > 80) return json({ error: 'Indica um nome de jogador válido.' }, 400, env);
-      const upstream = await fetch(`https://api.bigballsdata.com/v1/players?sport=basketball&league=nba&name=${encodeURIComponent(name)}`, { headers: { authorization: `Bearer ${env.BIGBALLSDATA_API_KEY}`, accept: 'application/json' } });
-      return new Response(upstream.body, { status: upstream.status, headers: { 'content-type': 'application/json', ...cors(env), 'cache-control': 'public, max-age=3600' } });
-    }
-
-    if (url.pathname === '/api/bbd/player-gamelog') {
-      if (!env.BIGBALLSDATA_API_KEY) return json({ error: 'bigballsdata_key_missing' }, 503, env);
-      const playerId = url.searchParams.get('playerId');
-      const season = url.searchParams.get('season');
-      if (!playerId || !/^[a-zA-Z0-9-]{6,80}$/.test(playerId) || !season || !/^20\d{2}$/.test(season)) return json({ error: 'playerId ou season inválido.' }, 400, env);
-      const upstream = await fetch(`https://api.bigballsdata.com/v1/players/${encodeURIComponent(playerId)}/gamelog?season=${season}`, { headers: { authorization: `Bearer ${env.BIGBALLSDATA_API_KEY}`, accept: 'application/json' } });
-      return new Response(upstream.body, { status: upstream.status, headers: { 'content-type': 'application/json', ...cors(env), 'cache-control': 'public, max-age=1800' } });
-    }
-
-    if (url.pathname === '/api/bbd/player-gamelogs' && request.method === 'POST') {
-      if (!env.BIGBALLSDATA_API_KEY) return json({ error: 'bigballsdata_key_missing' }, 503, env);
-      let body: { playerIds?: unknown; season?: number };
-      try { body = await request.json() as { playerIds?: unknown; season?: number }; }
-      catch { return json({ error: 'invalid_json' }, 400, env); }
-      const season = body.season;
-      const ids = Array.isArray(body.playerIds) ? [...new Set(body.playerIds)] : [];
-      if (!Number.isInteger(season) || !/^20\d{2}$/.test(String(season)) || ids.length < 1 || ids.length > 20 || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9-]{6,80}$/.test(id))) {
-        return json({ error: 'Indica 1 a 20 IDs BBD válidos e uma época válida.' }, 400, env);
-      }
-
-      const cache = (caches as unknown as { default: Cache }).default;
-      const results: Array<{ playerId: string; data?: unknown; error?: string; attempts?: number }> = [];
-
-      // Processamento controlado: no máximo 2 chamadas simultâneas à BBD.
-      for (let i = 0; i < ids.length; i += 2) {
-        const group = ids.slice(i, i + 2) as string[];
-        const fetched = await Promise.all(group.map(async playerId => {
-          const cacheKey = new Request(`https://edge-nba-cache.internal/bbd/gamelog/${season}/${playerId}`);
-          try {
-            const cached = await cache.match(cacheKey);
-            if (cached) {
-              const cachedPayload = await cached.json() as { data?: unknown } | unknown;
-              // A cache guarda o envelope original { data: [...] }; o frontend
-              // precisa de receber apenas o array. Também aceita entradas antigas
-              // que já tenham sido guardadas diretamente como array.
-              const cachedData = Array.isArray(cachedPayload)
-                ? cachedPayload
-                : (cachedPayload && typeof cachedPayload === 'object' && Array.isArray((cachedPayload as { data?: unknown }).data)
-                    ? (cachedPayload as { data: unknown[] }).data
-                    : null);
-              if (cachedData) return { playerId, data: cachedData, attempts: 0 };
-              // Cache antiga/inválida: apagar e consultar novamente a origem.
-              await cache.delete(cacheKey);
-            }
-
-            let lastError = 'BBD request failed';
-            for (let attempt = 1; attempt <= 2; attempt++) {
-              try {
-                const upstream = await fetch(`https://api.bigballsdata.com/v1/players/${encodeURIComponent(playerId)}/gamelog?season=${season}`, {
-                  headers: { authorization: `Bearer ${env.BIGBALLSDATA_API_KEY}`, accept: 'application/json' }
-                });
-                if (upstream.ok) {
-                  const payload = await upstream.json() as { data?: unknown };
-                  if (!Array.isArray(payload.data)) {
-                    lastError = 'BBD response missing data array';
-                  } else {
-                    const response = new Response(JSON.stringify({ data: payload.data }), {
-                      headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=1800' }
-                    });
-                    await cache.put(cacheKey, response);
-                    return { playerId, data: payload.data, attempts: attempt };
-                  }
-                } else {
-                  lastError = `BBD HTTP ${upstream.status}`;
-                  if (upstream.status < 500 && upstream.status !== 429 && upstream.status !== 408 && upstream.status !== 425) break;
-                }
-              } catch (error) {
-                lastError = String(error);
-              }
-              if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 400));
-            }
-            return { playerId, error: lastError, attempts: 2 };
-          } catch (error) {
-            return { playerId, error: String(error), attempts: 1 };
-          }
-        }));
-        results.push(...fetched);
-      }
-
-      const loaded = results.filter(result => Array.isArray(result.data)).length;
-      return json({ season, requested: ids.length, loaded, failed: ids.length - loaded, results }, 200, env);
-    }
-
     if (url.pathname === '/api/scan/status') return json({
-      status: 'partial-data-mode', maxDailyCandidates: 10,
-      connectedSources: ['ESPN scoreboard', 'ESPN injury report', 'ESPN game summaries (on demand)'],
-      requiresSetup: ['Deploy Worker', 'Validate ESPN response schemas', 'Add BigBallsData free API key for player game logs'],
+      status: 'espn-only-data-mode', maxDailyCandidates: 10,
+      connectedSources: ['ESPN scoreboard', 'ESPN rosters', 'ESPN injury report', 'ESPN game summaries (on demand)'],
+      requiresSetup: ['Deploy Worker', 'Sync ESPN rosters', 'Validate ESPN response schemas'],
       blockedClaims: ['No calibrated probability until historical backtesting is complete', 'No Top 10 publication until complete slate and player coverage are verified'],
-      markets: ['points', 'rebounds', 'assists', 'threes']
+      markets: ['points', 'rebounds', 'assists', 'threes', 'PRA']
     }, 200, env);
 
     if (url.pathname === '/api/analysis/ev' && request.method === 'POST') {
@@ -713,33 +562,35 @@ if (url.pathname === '/api/espn/sync-player-ids') {
       const date = body.date || new Date().toISOString().slice(0,10).replace(/-/g,'');
       if (!/^\d{8}$/.test(date)) return json({error:'date inválida'},400,env);
       const iso = `${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}`;
-      const games = await env.DB.prepare(
-        `SELECT g.game_id,g.game_date,g.home_team_id AS home,g.away_team_id AS away
-         FROM games g WHERE g.game_date=?`
-      ).bind(iso).all();
+      const season = Number(date.slice(4,6)) >= 7 ? Number(date.slice(0,4)) : Number(date.slice(0,4)) - 1;
       const ids = await env.DB.prepare(
-        "SELECT source_player_id,player_id FROM player_source_ids WHERE source='ESPN' AND season=2026 AND verified=1"
-      ).all();
+        "SELECT source_player_id,player_id FROM player_source_ids WHERE source='ESPN' AND season=? AND verified=1"
+      ).bind(season).all();
       const playerMap = new Map((ids.results || []).map((x:any)=>[String(x.source_player_id),x.player_id]));
-      const norm = (v:string) => v.toLowerCase().replace(/[^a-z0-9]/g,'');
       const saved = new Set<string>();
       const errors:string[] = [];
       const board:any = await espn(`scoreboard?dates=${date}`,60);
       for (const event of board.events || []) {
+        // Só sincronizar boxscores de jogos oficialmente concluídos.
+        if (event.status?.type?.completed !== true) continue;
         const comp = event.competitions?.[0];
-        const names = (comp?.competitors || []).map((x:any)=>x.team?.displayName || '');
-        const game:any = (games.results || []).find((g:any)=>
-          names.some((n:string)=>norm(n)===norm(g.home)) &&
-          names.some((n:string)=>norm(n)===norm(g.away))
-        );
-        if (!game) continue;
+        const competitors = comp?.competitors || [];
+        const espnTeamIds = competitors.map((x:any)=>String(x.team?.id || ''));
+        if (competitors.length < 2) continue;
+        const home = competitors.find((x:any)=>x.homeAway==='home') || competitors[0];
+        const away = competitors.find((x:any)=>x.homeAway==='away') || competitors[1];
+        const game = { game_id: String(event.id), game_date: iso, season,
+          home_team: String(home.team?.displayName || home.team?.name || ''),
+          away_team: String(away.team?.displayName || away.team?.name || '') };
         try {
+          await env.DB.prepare(`INSERT INTO games (game_id,season,game_date,home_team,away_team,status) VALUES (?,?,?,?,?,?) ON CONFLICT(game_id) DO UPDATE SET game_date=excluded.game_date,home_team=excluded.home_team,away_team=excluded.away_team,status=excluded.status`).bind(game.game_id,game.season,game.game_date,game.home_team,game.away_team,event.status?.type?.description || 'final').run();
           const summary:any = await espn(`summary?event=${event.id}`,30);
           const teams = summary.boxscore?.players || [];
           if (!teams.length) continue;
           for (const team of teams) {
             const teamName = team.team?.displayName || '';
-            const opponent = names.find((n:string)=>norm(n)!==norm(teamName)) || null;
+            const teamId = String(team.team?.id || '');
+            const opponent = String(competitors.find((x:any)=>String(x.team?.id || '') !== teamId)?.team?.displayName || '') || null;
             for (const group of team.statistics || []) {
               const labels = group.labels || group.names || [];
               for (const item of group.athletes || []) {
@@ -750,9 +601,11 @@ if (url.pathname === '/api/espn/sync-player-ids') {
                 const stat:any = {};
                 labels.forEach((label:string,i:number)=>stat[label.toUpperCase()]=vals[i]);
                 const num = (v:any) => {
-                  const n=Number.parseFloat(String(v ?? '').replace(':','.'));
+                  const n=Number.parseFloat(String(v ?? ''));
                   return Number.isFinite(n)?n:null;
                 };
+                const minutesValue = String(stat.MIN ?? '').trim();
+                const minutes = minutesValue.includes(':') ? (() => { const parts=minutesValue.split(':').map(Number); return parts.length===2 && parts.every(Number.isFinite) ? parts[0] + parts[1]/60 : null; })() : num(minutesValue);
                 const pair = (v:any) => {
                   const a=String(v || '').split('-');
                   return [num(a[0]),num(a[1])];
@@ -760,28 +613,104 @@ if (url.pathname === '/api/espn/sync-player-ids') {
                 const [fgm,fga]=pair(stat.FG);
                 const [tpm,tpa]=pair(stat['3PT']);
                 const [ftm,fta]=pair(stat.FT);
-                const minutes = num(stat.MIN);
                 const key = `${playerId}:${game.game_id}`;
                 if (saved.has(key)) continue;
                 saved.add(key);
                 await env.DB.prepare(
                   `INSERT INTO player_game_stats
-                   (player_id,game_id,minutes,points,rebounds,assists,threes,opponent_team_id,is_home,starter_status,source,fetched_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
-                   ON CONFLICT(player_id,game_id) DO UPDATE SET
-                   minutes=excluded.minutes,points=excluded.points,rebounds=excluded.rebounds,
-                   assists=excluded.assists,threes=excluded.threes,opponent_team_id=excluded.opponent_team_id,
-                   is_home=excluded.is_home,starter_status=excluded.starter_status,
-                   source=excluded.source,fetched_at=CURRENT_TIMESTAMP`
-                ).bind(playerId,game.game_id,minutes,num(stat.PTS),num(stat.REB),num(stat.AST),tpm,opponent,null,'unknown','espn').run();
+                   (player_id,game_id,season,game_date,opponent,minutes,points,rebounds,assists,steals,blocks,turnovers,three_pointers_made,field_goals_made,field_goals_attempted,three_pointers_attempted)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(player_id,game_id,season) DO UPDATE SET
+                   game_date=excluded.game_date,opponent=excluded.opponent,minutes=excluded.minutes,
+                   points=excluded.points,rebounds=excluded.rebounds,assists=excluded.assists,
+                   steals=excluded.steals,blocks=excluded.blocks,turnovers=excluded.turnovers,
+                   three_pointers_made=excluded.three_pointers_made,field_goals_made=excluded.field_goals_made,
+                   field_goals_attempted=excluded.field_goals_attempted,three_pointers_attempted=excluded.three_pointers_attempted,
+                   updated_at=CURRENT_TIMESTAMP`
+                ).bind(playerId,game.game_id,Number(game.season),game.game_date,opponent,minutes,num(stat.PTS),num(stat.REB),num(stat.AST),num(stat.STL),num(stat.BLK),num(stat.TO),tpm,fgm,fga,tpa).run();
               }
             }
           }
         } catch(e) { errors.push(`${event.id}: ${String(e)}`); }
       }
-      return json({date:iso,games_found:(games.results||[]).length,players_saved:saved.size,errors},200,env);
+      return json({source:'ESPN',date:iso,games_found:(board.events||[]).length,players_saved:saved.size,errors},200,env);
     }
 
     return json({ error: 'not_found' }, 404, env);
+  },
+
+  scheduled(controller: ScheduledControllerLike, env: Env, ctx: ScheduledContext): void {
+    ctx.waitUntil((async () => {
+      // Existem dois Cron Triggers UTC (09:00 e 10:00). Este filtro garante
+      // uma única execução às 10:00 em Europe/Lisbon, com horário de verão/inverno.
+      const now = new Date();
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/Lisbon', hour: '2-digit', minute: '2-digit',
+        year: 'numeric', month: '2-digit', day: '2-digit', hourCycle: 'h23'
+      }).formatToParts(now);
+      const local = Object.fromEntries(parts.map(part => [part.type, part.value]));
+      if (!env.DB) throw new Error('D1 não está ligada ao Worker.');
+
+      // Uma das duas execuções UTC diárias não coincide com as 10:00 locais
+      // e avança exatamente um dia do backfill, preservando a cadência diária.
+      if (local.hour !== '10' || local.minute !== '00') {
+        try {
+          const state = await env.DB.prepare(`SELECT season,next_offset,total_days,status,locked_until FROM espn_backfill_state WHERE id=1`).first() as any;
+          if (!state || state.status !== 'running') return;
+          const nowMs = Date.now();
+          if (state.locked_until && Number(state.locked_until) > nowMs) return;
+          const claimed = await env.DB.prepare(`UPDATE espn_backfill_state SET locked_until=?,updated_at=CURRENT_TIMESTAMP WHERE id=1 AND status='running' AND (locked_until IS NULL OR locked_until<=?)`).bind(nowMs + 4 * 60 * 1000, nowMs).run();
+          if (!claimed.meta?.changes) return;
+          const token = await createSession(env.SESSION_SECRET);
+          const response = await worker.fetch(new Request(`https://edge-nba-ai.internal/api/espn/backfill?season=${state.season}&offset=${state.next_offset}&days=1`, { headers: { cookie: `edge_session=${encodeURIComponent(token)}` } }), env);
+          const body = await response.text();
+          let result: any;
+          try { result = JSON.parse(body); } catch { throw new Error(`Resposta inválida no backfill automático: ${body}`); }
+          // Só avançar o cursor quando o dia foi importado sem erros.
+          // Se houver falhas parciais, repetir o mesmo dia é seguro graças aos UPSERTs.
+          if (!response.ok || !result.range || result.success !== true || (Array.isArray(result.errors) && result.errors.length > 0)) {
+            throw new Error(`Backfill automático incompleto HTTP ${response.status}: ${body}`);
+          }
+          const nextOffset = Number(result.range.next_offset);
+          if (!Number.isInteger(nextOffset) || nextOffset <= Number(state.next_offset)) {
+            throw new Error(`Cursor de backfill inválido: ${String(result.range.next_offset)}`);
+          }
+          const complete = result.range.complete === true;
+          await env.DB.prepare(`UPDATE espn_backfill_state SET next_offset=?,status=?,locked_until=NULL,last_result=?,updated_at=CURRENT_TIMESTAMP WHERE id=1`).bind(nextOffset, complete ? 'complete' : 'running', JSON.stringify(result).slice(0, 12000)).run();
+          console.log(`Backfill automático: offset ${state.next_offset} -> ${nextOffset}; estado ${complete ? 'complete' : 'running'}`);
+        } catch (error) {
+          console.error('Backfill automático falhou:', error);
+          try { await env.DB.prepare(`UPDATE espn_backfill_state SET locked_until=NULL,last_result=?,updated_at=CURRENT_TIMESTAMP WHERE id=1`).bind(JSON.stringify({ error: String(error) })).run(); } catch {}
+        }
+        return;
+      }
+
+      const localDate = `${local.year}-${local.month}-${local.day}`;
+      const previous = new Date(`${localDate}T12:00:00Z`);
+      previous.setUTCDate(previous.getUTCDate() - 1);
+      const date = previous.toISOString().slice(0, 10).replace(/-/g, '');
+      const token = await createSession(env.SESSION_SECRET);
+      const cookie = `edge_session=${encodeURIComponent(token)}`;
+
+      // Revalidar plantéis/IDs e depois importar apenas os jogos do dia anterior.
+      const rosterResponse = await worker.fetch(new Request('https://edge-nba-ai.internal/api/espn/sync-player-ids', {
+        method: 'POST', headers: { cookie }
+      }), env);
+      const rosterBody = await rosterResponse.text();
+      if (!rosterResponse.ok) throw new Error(`Sincronização de plantéis falhou: HTTP ${rosterResponse.status} ${rosterBody}`);
+      let rosterResult: any;
+      try { rosterResult = JSON.parse(rosterBody); } catch { throw new Error(`Resposta inválida na sincronização de plantéis: ${rosterBody}`); }
+      if (rosterResult.success !== true) throw new Error(`Sincronização de plantéis incompleta: ${JSON.stringify(rosterResult.errors || rosterResult)}`);
+
+      const boxscoreResponse = await worker.fetch(new Request('https://edge-nba-ai.internal/api/espn/sync-boxscore', {
+        method: 'POST', headers: { cookie, 'content-type': 'application/json' },
+        body: JSON.stringify({ date })
+      }), env);
+      const boxscoreBody = await boxscoreResponse.text();
+      if (!boxscoreResponse.ok) throw new Error(`Sincronização de boxscores falhou: HTTP ${boxscoreResponse.status} ${boxscoreBody}`);
+      console.log(`Sincronização diária ESPN concluída para ${date}: ${boxscoreBody}`);
+    })());
   }
 };
+
+export default worker;
