@@ -5,6 +5,7 @@ export type StatLine = {
   rebounds: number;
   assists: number;
   threes: number;
+  threePointAttempts?: number;
   pra?: number;
   postseason?: boolean;
 };
@@ -13,7 +14,7 @@ export type Market = 'points' | 'rebounds' | 'assists' | 'threes' | 'pra';
 
 type ESPNGame = {
   date?: unknown; minutes?: unknown; points?: unknown; rebounds?: unknown;
-  assists?: unknown; threes?: unknown; postseason?: unknown;
+  assists?: unknown; threes?: unknown; threePointAttempts?: unknown; postseason?: unknown;
 };
 type GamelogPayload = { data?: unknown };
 
@@ -47,9 +48,11 @@ export function adaptEspnGamelog(
     const rebounds = toNumber(game.rebounds);
     const assists = toNumber(game.assists);
     const threes = toNumber(game.threes);
+    const threePointAttempts = toNumber(game.threePointAttempts);
     if (typeof game.date !== 'string' || !Number.isFinite(Date.parse(game.date)) ||
       minutes === null || points === null || rebounds === null || assists === null || threes === null) continue;
     rows.push({ date: game.date, minutes, points, rebounds, assists, threes,
+      ...(threePointAttempts !== null && threePointAttempts >= 0 ? { threePointAttempts } : {}),
       pra: points + rebounds + assists, postseason: game.postseason === true });
   }
   return rows.sort((a,b) => b.date.localeCompare(a.date));
@@ -264,7 +267,17 @@ export function rankPlayerTrends(
 
     const direction: 'OVER' | 'UNDER' = delta > 0 ? 'OVER' : 'UNDER';
     const suggestedLine = lineForAverage(recentMean, direction);
-    if (market === 'threes' && (recentMean < 1 || suggestedLine < 0.5)) continue;
+    if (market === 'threes') {
+      if (recentMean < 1 || suggestedLine < 0.5) continue;
+
+      const recentAttempts = recent
+        .map(game => game.threePointAttempts)
+        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+      const attemptsMean = mean(recentAttempts);
+
+      // Só aplicar o filtro de volume quando existirem pelo menos 4 registos de 3PA.
+      if (recentAttempts.length >= 4 && attemptsMean !== null && attemptsMean < 3) continue;
+    }
     const recentHits = recentValues.filter(value =>
       direction === 'OVER' ? value > suggestedLine : value < suggestedLine
     ).length;

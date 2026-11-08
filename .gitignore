@@ -1,0 +1,24 @@
+worker/.dev.vars
+
+# Secrets and local environment
+.env*
+!.env.example
+.session-secret
+worker/.dev.vars
+
+# Generated files
+node_modules/
+dist/
+worker/.wrangler/
+
+# Local editor settings
+.vscode/
+
+# Backup files
+*.bak
+*.backup
+*.before-*
+
+# Worker backup snapshots
+worker/src/*.backup*
+worker/src/*.before-*

@@ -441,7 +441,7 @@ const worker: WorkerHandler = {
       const season = Number(url.searchParams.get('season') || nbaSeasonForDate());
       if (!playerId || playerId.length > 80 || !Number.isInteger(season)) return json({ error: 'Parâmetros inválidos.' }, 400, env);
       try {
-        const rows = await env.DB.prepare(`SELECT game_date AS date,minutes,points,rebounds,assists,three_pointers_made AS threes FROM player_game_stats WHERE player_id=? AND season=? ORDER BY game_date DESC`).bind(playerId,season).all();
+        const rows = await env.DB.prepare(`SELECT game_date AS date,minutes,points,rebounds,assists,three_pointers_made AS threes,three_pointers_attempted AS threePointAttempts FROM player_game_stats WHERE player_id=? AND season=? ORDER BY game_date DESC`).bind(playerId,season).all();
         return json({ source: 'ESPN / Cloudflare D1', data: rows.results || [], meta: { sample: (rows.results || []).length, season } }, 200, env, 'private, max-age=60');
       } catch (error) { return json({ error: 'espn_gamelog_failed', detail: String(error) }, 500, env); }
     }
@@ -456,7 +456,7 @@ const worker: WorkerHandler = {
       try {
         const results = [];
         for (const playerId of ids) {
-          const rows = await env.DB.prepare(`SELECT game_date AS date,minutes,points,rebounds,assists,three_pointers_made AS threes FROM player_game_stats WHERE player_id=? AND season=? ORDER BY game_date DESC LIMIT 100`).bind(playerId,season).all();
+          const rows = await env.DB.prepare(`SELECT game_date AS date,minutes,points,rebounds,assists,three_pointers_made AS threes,three_pointers_attempted AS threePointAttempts FROM player_game_stats WHERE player_id=? AND season=? ORDER BY game_date DESC LIMIT 100`).bind(playerId,season).all();
           results.push({ playerId, data: rows.results || [] });
         }
         return json({ source: 'ESPN / Cloudflare D1', results }, 200, env, 'private, max-age=30');

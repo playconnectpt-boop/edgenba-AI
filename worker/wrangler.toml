@@ -1,0 +1,14 @@
+name = "edge-nba-ai-api"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "edge-nba-db"
+database_id = "b71a8454-cc46-460e-b4b7-7ae1634681bb"
+
+[vars]
+APP_ORIGIN = "https://edge-nba-ai.pages.dev"
+
+[triggers]
+crons = ["0 9 * * *", "0 10 * * *"]

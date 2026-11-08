@@ -48,3 +48,30 @@ test('ESPN adapter validates payload and derives PRA from supplied stats', () =>
   const result = adaptEspnGamelog({ data: [{ date: '2026-01-01', minutes: '30', points: '10', rebounds: '3', assists: '2', threes: '1' }] });
   assert.equal(result[0].pra, 15);
 });
+
+
+test('ESPN adapter preserves 3PA and leaves missing attempts absent', () => {
+  const result = adaptEspnGamelog({ data: [
+    { date: '2026-01-02', minutes: '30', points: '10', rebounds: '3', assists: '2', threes: '2', threePointAttempts: '7' },
+    { date: '2026-01-01', minutes: '28', points: '8', rebounds: '4', assists: '1', threes: '1', threePointAttempts: null }
+  ] });
+
+  assert.equal(result[0].threePointAttempts, 7);
+  assert.equal(Object.hasOwn(result[1], 'threePointAttempts'), false);
+});
+
+test('low 3PA volume filters an otherwise valid UNDER threes trend', () => {
+  const games = rows(
+    [2,2,2,2,2,3,3,3,3,3],
+    [2,2,2,2,2,3,3,3,3,3]
+  ).map((game, index) => ({
+    ...game,
+    threePointAttempts: index < 5 ? 1 : 5
+  }));
+
+  const trends = rankPlayerTrends({ id: 'p-low-volume', name: 'Low Volume Player' }, games);
+  assert.equal(
+    trends.some(x => x.market === 'threes' && x.direction === 'UNDER'),
+    false
+  );
+});

@@ -396,7 +396,12 @@ async function loadEspnGamelog(player:ESPNPlayer){
    const x=espnProfile!.markets[m] as {season:{sample:number;mean:number|null;median:number|null};last10:{sample:number;mean:number|null};last5:{sample:number;mean:number|null}};
    return `<div class="source"><span><b>${labels[m]}</b><small>Época: ${x.season.sample} jogos · Média ${fmt(x.season.mean)} · Mediana ${fmt(x.season.median)}</small></span><strong>5J: ${fmt(x.last5.mean)}<br>10J: ${fmt(x.last10.mean)}</strong></div>`;
   }).join('');
-  const recent=rows.slice(0,5).map(g=>`<div class="source"><span><b>${escapeHtml(g.date)}</b><small>${g.minutes} min</small></span><strong>${g.points} PTS · ${g.rebounds} REB · ${g.assists} AST · ${g.threes} 3PM · ${g.pra} PRA</strong></div>`).join('');
+  const recent=rows.slice(0,5).map(g=>{
+   const attempts=typeof g.threePointAttempts==='number'&&Number.isFinite(g.threePointAttempts)&&g.threePointAttempts>0
+    ? ` / ${g.threePointAttempts} 3PA · ${(g.threes/g.threePointAttempts*100).toFixed(1).replace('.',',')}%`
+    : '';
+   return `<div class="source"><span><b>${escapeHtml(g.date)}</b><small>${g.minutes} min</small></span><strong>${g.points} PTS · ${g.rebounds} REB · ${g.assists} AST · ${g.threes} 3PM${attempts} · ${g.pra} PRA</strong></div>`;
+  }).join('');
   target.innerHTML=`<div class="notice"><b>Histórico carregado com sucesso</b><p>${escapeHtml(player.name)} · ${escapeHtml(player.team_name||'Equipa não indicada')} · Época ${season}-${String(season+1).slice(-2)} · ${rows.length} jogos válidos</p></div><h3>Resumo estatístico</h3>${marketRows}<h3>Últimos 5 jogos</h3>${recent}<p class="footnote">Fonte: ESPN / Cloudflare D1. Estatísticas descritivas; ainda não representam probabilidades calibradas nem recomendações.</p>`;
   if(results)results.innerHTML=`<div class="notice"><b>${escapeHtml(player.name)} seleccionado</b><p>ID ESPN: ${escapeHtml(player.id)}</p></div>`;
  }catch(error){

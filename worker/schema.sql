@@ -1,0 +1,17 @@
+PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS teams (team_id TEXT PRIMARY KEY, abbreviation TEXT NOT NULL, full_name TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS players (player_id TEXT PRIMARY KEY, full_name TEXT NOT NULL, team_id TEXT, position TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS games (game_id TEXT PRIMARY KEY, season TEXT NOT NULL, game_date TEXT NOT NULL, home_team_id TEXT, away_team_id TEXT, status TEXT, source TEXT NOT NULL, fetched_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS player_game_stats (player_id TEXT NOT NULL, game_id TEXT NOT NULL, minutes REAL, points INTEGER, rebounds INTEGER, assists INTEGER, threes INTEGER, opponent_team_id TEXT, is_home INTEGER, starter_status TEXT, source TEXT NOT NULL, fetched_at TEXT NOT NULL, PRIMARY KEY(player_id,game_id));
+CREATE TABLE IF NOT EXISTS injuries (player_id TEXT NOT NULL, game_id TEXT, status TEXT NOT NULL, reason TEXT, source TEXT NOT NULL, observed_at TEXT NOT NULL, PRIMARY KEY(player_id,source,observed_at));
+CREATE TABLE IF NOT EXISTS rotations (player_id TEXT NOT NULL, game_id TEXT NOT NULL, projected_minutes REAL, minutes_low REAL, minutes_high REAL, scenario TEXT NOT NULL, source TEXT NOT NULL, observed_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS predictions (prediction_id TEXT PRIMARY KEY, player_id TEXT NOT NULL, game_id TEXT NOT NULL, market TEXT NOT NULL, line REAL NOT NULL, probability_over REAL, probability_under REAL, fair_odds_over REAL, fair_odds_under REAL, probability_low REAL, probability_high REAL, model_version TEXT NOT NULL, sample_size INTEGER NOT NULL, data_as_of TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS analyses (analysis_id TEXT PRIMARY KEY, slate_date TEXT NOT NULL, status TEXT NOT NULL, games_expected INTEGER, games_processed INTEGER, candidates_count INTEGER DEFAULT 0, model_version TEXT, started_at TEXT NOT NULL, finished_at TEXT, diagnostics TEXT);
+CREATE TABLE IF NOT EXISTS candidate_rankings (analysis_id TEXT NOT NULL, rank INTEGER NOT NULL, prediction_id TEXT NOT NULL, quality_score REAL NOT NULL, rationale TEXT NOT NULL, PRIMARY KEY(analysis_id,rank));
+CREATE TABLE IF NOT EXISTS user_quotes (quote_id TEXT PRIMARY KEY, prediction_id TEXT NOT NULL, bookmaker TEXT NOT NULL CHECK(bookmaker='spinbetter'), line REAL NOT NULL, decimal_odds REAL NOT NULL, observed_at TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS outcomes (prediction_id TEXT PRIMARY KEY, actual_value REAL NOT NULL, result TEXT NOT NULL, settled_at TEXT NOT NULL, source TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS provider_runs (run_id TEXT PRIMARY KEY, provider TEXT NOT NULL, status TEXT NOT NULL, records_received INTEGER DEFAULT 0, error TEXT, started_at TEXT NOT NULL, finished_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_games_date ON games(game_date);
+CREATE INDEX IF NOT EXISTS idx_stats_player ON player_game_stats(player_id);
+CREATE INDEX IF NOT EXISTS idx_injuries_game ON injuries(game_id);
+CREATE INDEX IF NOT EXISTS idx_predictions_date ON predictions(created_at);
