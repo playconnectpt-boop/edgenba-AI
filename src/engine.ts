@@ -149,8 +149,16 @@ export type TrendCandidate = {
   previousMean: number;
   seasonMedian: number;
   suggestedLine: number;
-  recentHitRate: number;
-  recentHits: number;
+  trendHitRate: number;
+  trendHits: number;
+  lineHitRate: number | null;
+  lineHits: number;
+  linePushes: number;
+  lineSample: number;
+  previousLineHitRate: number | null;
+  previousLineHits: number;
+  previousLinePushes: number;
+  previousLineSample: number;
   recentSample: number;
   previousSample: number;
   seasonSample: number;
@@ -162,12 +170,17 @@ export type TrendCandidate = {
   confidence: 'LIMITADA' | 'BAIXA' | 'MODERADA';
 };
 
-/** Keep the strongest market for each player so one athlete cannot dominate a shortlist. */
+/** Keep distinct market opportunities, removing only exact duplicates. */
 export function uniquePlayersTop(candidates: TrendCandidate[], limit = 10): TrendCandidate[] {
   const seen = new Set<string>();
   const result: TrendCandidate[] = [];
-  for (const candidate of [...candidates].sort((a, b) => b.score - a.score)) {
-    const key = candidate.playerId || candidate.playerName.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  for (const candidate of [...candidates].sort((a, b) => {
+    const priorityA = a.score + (a.direction === 'OVER' ? 5 : 0);
+    const priorityB = b.score + (b.direction === 'OVER' ? 5 : 0);
+    return priorityB - priorityA || b.score - a.score;
+  })) {
+    const playerKey = candidate.playerId || candidate.playerName.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const key = `${playerKey}|${candidate.market}|${candidate.direction}|${candidate.suggestedLine}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(candidate);
@@ -240,19 +253,46 @@ export function rankPlayerTrends(
 
     const seasonMean = mean(seasonValues);
     const recentMean = mean(recentValues);
+    const recentMedian = median(recentValues);
     const recent10Mean = mean(last10Values);
     const previousMean = mean(previousValues);
+    const previousMedian = median(previousValues);
     const seasonMedian = median(seasonValues);
+
+    // Market relevance is independent of OVER/UNDER direction.
+    const relevanceRules: Record<Market, { minMean: number; meaningfulValue: number; minFrequency: number }> = {
+      points: { minMean: 8, meaningfulValue: 5, minFrequency: 0.60 },
+      rebounds: { minMean: 3, meaningfulValue: 2, minFrequency: 0.60 },
+      assists: { minMean: 1.5, meaningfulValue: 1, minFrequency: 0.60 },
+      threes: { minMean: 1, meaningfulValue: 1, minFrequency: 0.50 },
+      pra: { minMean: 12, meaningfulValue: 10, minFrequency: 0.60 }
+    };
+
+    const relevance = relevanceRules[market];
+    const meaningfulGames = seasonValues.filter(
+      value => value >= relevance.meaningfulValue
+    ).length;
+    const meaningfulFrequency = seasonValues.length
+      ? meaningfulGames / seasonValues.length
+      : 0;
+
+    if (
+      seasonMean === null ||
+      seasonMean < relevance.minMean ||
+      meaningfulFrequency < relevance.minFrequency
+    ) continue;
 
     if (
       seasonMean === null ||
       recentMean === null ||
+      recentMedian === null ||
       recent10Mean === null ||
       previousMean === null ||
+      previousMedian === null ||
       seasonMedian === null ||
       seasonValues.length < 8 ||
-      recentValues.length < 4 ||
-      previousValues.length < 3
+      recentValues.length < 5 ||
+      previousValues.length < 5
     ) continue;
 
     const variance = seasonValues.reduce(
@@ -262,11 +302,17 @@ export function rankPlayerTrends(
     const standardDeviation = Math.sqrt(variance);
     if (standardDeviation === 0) continue;
 
-    const delta = recentMean - previousMean;
+    // Use medians to identify the shift, reducing sensitivity to isolated outliers.
+    const delta = recentMedian - previousMedian;
     if (delta === 0) continue;
 
     const direction: 'OVER' | 'UNDER' = delta > 0 ? 'OVER' : 'UNDER';
     const suggestedLine = lineForAverage(recentMean, direction);
+
+    // Reject UNDER lines that are not below the player's typical season production.
+    // This is adaptive to each player and market, avoiding arbitrary fixed line floors.
+    if (direction === 'UNDER' && suggestedLine >= seasonMedian) continue;
+
     if (market === 'threes') {
       if (recentMean < 1 || suggestedLine < 0.5) continue;
 
@@ -278,28 +324,75 @@ export function rankPlayerTrends(
       // Só aplicar o filtro de volume quando existirem pelo menos 4 registos de 3PA.
       if (recentAttempts.length >= 4 && attemptsMean !== null && attemptsMean < 3) continue;
     }
-    const recentHits = recentValues.filter(value =>
+    // Trend consistency is measured against the preceding-five median.
+    const trendHits = recentValues.filter(value =>
+      direction === 'OVER' ? value > previousMedian : value < previousMedian
+    ).length;
+    const trendHitRate = trendHits / recentValues.length;
+
+    // Line hit rate is a separate, in-sample descriptive statistic.
+    const lineHits = recentValues.filter(value =>
       direction === 'OVER' ? value > suggestedLine : value < suggestedLine
     ).length;
-    const recentHitRate = recentHits / recentValues.length;
+    const linePushes = recentValues.filter(value => value === suggestedLine).length;
+    const lineSample = recentValues.length - linePushes;
+    const lineHitRate = lineSample > 0 ? lineHits / lineSample : null;
+
+    // Avaliar a mesma linha e direção nos cinco jogos anteriores.
+    const previousLineHits = previousValues.filter(value =>
+      direction === 'OVER' ? value > suggestedLine : value < suggestedLine
+    ).length;
+    const previousLinePushes = previousValues.filter(
+      value => value === suggestedLine
+    ).length;
+    const previousLineSample = previousValues.length - previousLinePushes;
+    const previousLineHitRate = previousLineSample > 0
+      ? previousLineHits / previousLineSample
+      : null;
+
     const zScore = Math.abs(delta) / standardDeviation;
 
-    // Prioritise meaningful and repeated shifts, not players with high raw averages.
-    const consistencyScore = recentHitRate * 40;
-    const shiftScore = Math.min(40, zScore * 20);
-    const sampleScore = Math.min(recentValues.length, 5) * 4;
-    const score = Math.min(100, Math.round(consistencyScore + shiftScore + sampleScore));
+    // Descriptive trend index only: in-sample line hit rate does not affect the score.
+    const consistencyScore = trendHitRate * 40;
+    const shiftScore = Math.min(30, zScore * 15);
+    const sampleScore = Math.min(recentValues.length, 5) * 6;
+    const score = Math.min(100, Math.round(
+      consistencyScore + shiftScore + sampleScore
+    ));
 
-    // A candidate needs both a real change against the preceding five and
-    // repeated results on the corresponding side of its automatically derived line.
-    if (zScore < 0.25 || recentHitRate < 0.6 || score < 45) continue;
+    // Mínimo de 50% na linha nos cinco jogos mais recentes.
+    if (
+      zScore < 0.25 ||
+      trendHitRate < 0.6 ||
+      lineHitRate === null ||
+      lineHitRate < 0.5 ||
+      previousLineHitRate === null ||
+      score < 50
+    ) continue;
+
+    // Excluir deterioração recente de 30 pontos percentuais ou mais.
+    // A média dos últimos dez jogos não pode mascarar esta quebra.
+    if (previousLineHitRate - lineHitRate >= 0.30) continue;
 
     const minutesNote = minutesRecent !== null && minutesSeason !== null
       ? `Minutos: ${minutesRecent.toFixed(1)} nos últimos 5 vs ${minutesSeason.toFixed(1)} na época.`
       : 'Minutos insuficientes para comparação.';
 
-    const quality: TrendCandidate['quality'] = score >= 75 && recentValues.length >= 5 && previousValues.length >= 5 ? 'FORTE' : score >= 58 ? 'MODERADA' : 'FRACA';
-    const confidence: TrendCandidate['confidence'] = seasonValues.length < 10 || recentValues.length < 5 || previousValues.length < 5 ? 'LIMITADA' : score >= 75 ? 'MODERADA' : 'BAIXA';
+    const quality: TrendCandidate['quality'] =
+      score >= 80 &&
+      trendHitRate >= 0.8 &&
+      recentValues.length >= 5 &&
+      previousValues.length >= 5
+        ? 'FORTE'
+        : score >= 58 && trendHitRate >= 0.6
+          ? 'MODERADA'
+          : 'FRACA';
+    const minutesUnstable = minutesRecent !== null && minutesSeason !== null &&
+      minutesRecent < minutesSeason * 0.85;
+    const confidence: TrendCandidate['confidence'] =
+      seasonValues.length < 10 || recentValues.length < 5 || previousValues.length < 5 || minutesUnstable
+        ? 'LIMITADA'
+        : score >= 75 ? 'MODERADA' : 'BAIXA';
     output.push({
       playerId: player.id,
       playerName: player.name,
@@ -314,8 +407,16 @@ export function rankPlayerTrends(
       previousMean,
       seasonMedian,
       suggestedLine,
-      recentHitRate,
-      recentHits,
+      trendHitRate,
+      trendHits,
+      lineHitRate,
+      lineHits,
+      linePushes,
+      lineSample,
+      previousLineHitRate,
+      previousLineHits,
+      previousLinePushes,
+      previousLineSample,
       recentSample: recentValues.length,
       previousSample: previousValues.length,
       seasonSample: seasonValues.length,
@@ -328,7 +429,14 @@ export function rankPlayerTrends(
         `Últimos 5: ${recentMean.toFixed(1)}; linha sugerida: ${suggestedLine.toFixed(1)} ${direction}. ` +
         `Últimos 10: ${recent10Mean.toFixed(1)}; 5 jogos anteriores: ${previousMean.toFixed(1)}; ` +
         `época: ${seasonMean.toFixed(1)} (mediana ${seasonMedian.toFixed(1)}). ` +
-        `${recentHits}/${recentValues.length} dos últimos jogos ficaram do lado ${direction} da linha. ${seasonValues.length < 8 || recentValues.length < 4 || previousValues.length < 3 ? 'AMOSTRA REDUZIDA: confiança estatística limitada. ' : ''}${minutesNote}`
+        `Tendência face à mediana anterior: ${trendHits}/${recentValues.length} (${(trendHitRate * 100).toFixed(0)}%). ` +
+        `Linha ${suggestedLine.toFixed(1)} ${direction}: ${lineHits}/${lineSample} acertos` +
+        `${linePushes ? ` e ${linePushes} pushes` : ''}` +
+        `${lineHitRate === null ? ' (sem resultados decisivos)' : ` (${(lineHitRate * 100).toFixed(0)}%)`}. ` +
+        `Mesma linha nos 5 jogos anteriores: ${previousLineHits}/${previousLineSample} acertos` +
+        `${previousLinePushes ? ` e ${previousLinePushes} pushes` : ''} (${(previousLineHitRate! * 100).toFixed(0)}%). ` +
+        `${minutesUnstable ? 'MINUTOS RECENTES REDUZIDOS: confiança limitada. ' : ''}` +
+        `${seasonValues.length < 10 || recentValues.length < 5 || previousValues.length < 5 ? 'AMOSTRA REDUZIDA: confiança estatística limitada. ' : ''}${minutesNote}`
     });
   }
 

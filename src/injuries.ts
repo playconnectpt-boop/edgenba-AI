@@ -68,12 +68,11 @@ export function parseEspnInjuryReport(payload: unknown): EspnInjuryReport {
 
       if (athleteId && status) {
         const label = /suspend/i.test(status) ? 'SUSPENSO'
-          : /question|day.to.day/i.test(status) ? 'QUESTIONÁVEL'
-          : /doubt/i.test(status) ? 'DUVIDOSO'
-          : /probab/i.test(status) ? 'PROVÁVEL'
-          : /inactive/i.test(status) ? 'INATIVO'
-          : /out|injur/i.test(status) ? 'LESIONADO'
-          : '';
+  : /question|day.to.day/i.test(status) ? 'QUESTIONÁVEL'
+  : /doubt/i.test(status) ? 'DUVIDOSO'
+  : /inactive/i.test(status) ? 'INATIVO'
+  : /out|injur/i.test(status) ? 'LESIONADO'
+  : '';
 
         if (label) statuses.set(athleteId, label);
       }

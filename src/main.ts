@@ -8,7 +8,7 @@ type ESPNScoreboard = { source: string; retrievedAt: string; data: { events?: Ar
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const tabs: {id:Tab;label:string;icon:string}[] = [
   {id:'dashboard',label:'Início',icon:'⌂'}, {id:'scan',label:'Análise',icon:'◎'},
-  {id:'opportunities',label:'Top 10',icon:'↗'}, {id:'validator',label:'Validação',icon:'◇'},
+  {id:'opportunities',label:'Top 10',icon:'↗'}, {id:'validator',label:'Ones to Watch',icon:'✦'},
   {id:'history',label:'Histórico',icon:'◷'}
 ];
 let active:Tab='dashboard';
@@ -16,7 +16,7 @@ let authenticated = false;
 let authMessage = '';
 let installPrompt: BeforeInstallPromptEvent | null = null;
 const viteEnv = (import.meta as ImportMeta & { env?: { VITE_API_BASE?: string; DEV?: boolean } }).env;
-const API_BASE = (viteEnv?.VITE_API_BASE || (viteEnv?.DEV ? '' : 'https://edge-nba-ai-api.edge-nba-ai-tips.workers.dev')).replace(/\/$/, '');
+const API_BASE = (viteEnv?.DEV ? '' : (viteEnv?.VITE_API_BASE || 'https://edge-nba-ai-api.edge-nba-ai-tips.workers.dev')).replace(/\/$/, '');
 
 interface BeforeInstallPromptEvent extends Event { prompt(): Promise<void>; userChoice: Promise<{outcome:'accepted'|'dismissed'}> }
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt=e as BeforeInstallPromptEvent; render(); });
@@ -84,8 +84,11 @@ const render = () => {
   <nav>${tabs.map(t=>`<button class="nav-item ${active===t.id?'selected':''}" data-tab="${t.id}"><span>${t.icon}</span><small>${t.label}</small></button>`).join('')}</nav>`;
  document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b=>b.addEventListener('click',()=>{active=b.dataset.tab as Tab;render()}));
  document.querySelector('#install')?.addEventListener('click',async()=>{if(installPrompt){await installPrompt.prompt();installPrompt=null;render()}else alert('No Android: menu do navegador → Adicionar ao ecrã inicial. No iPhone: Safari → Partilhar → Adicionar ao ecrã principal.')});
- document.querySelector('#save-odds')?.addEventListener('click',saveOdds);
- document.querySelector('#run-scan')?.addEventListener('click',runScan);
+  document.querySelector('#run-scan')?.addEventListener('click',runScan);
+ if(active==='validator'){
+  document.querySelector('#refresh-ones-to-watch')?.addEventListener('click',()=>void loadOnesToWatch());
+  void loadOnesToWatch();
+ }
  document.querySelector('#espn-search')?.addEventListener('click',searchEspnPlayer);
  document.querySelector('#espn-player-name')?.addEventListener('keydown',e=>{if((e as KeyboardEvent).key==='Enter'){e.preventDefault();void searchEspnPlayer();}});
  document.querySelector('#espn-season')?.addEventListener('keydown',e=>{if((e as KeyboardEvent).key==='Enter'){e.preventDefault();}});
@@ -96,10 +99,10 @@ const render = () => {
  document.querySelector('#check-provider')?.addEventListener('click',()=>alert('Ainda não existem credenciais ou contrato de API configurados.'));
 };
 function dashboard(){return `
- <section class="hero"><p class="eyebrow">NBA · DAILY RESEARCH SYSTEM</p><h1>Investigar tudo.<br><em>Selecionar com critério.</em></h1><p class="sub">Análise integral dos jogos e jogadores. Até 10 oportunidades fundamentadas por dia. O sistema não inventa dados para preencher a lista.</p><div class="hero-actions"><button class="primary" data-tab="scan" id="go-scan">Abrir análise diária</button><button class="secondary" id="install">Instalar aplicação</button></div></section>
- <section class="status-grid"><article class="metric"><span>Jogos analisados hoje</span><strong>—</strong><small>A aguardar fonte de dados</small></article><article class="metric"><span>Mercados avaliados</span><strong>—</strong><small>4 tipos de player props</small></article><article class="metric"><span>Oportunidades aprovadas</span><strong>0</strong><small>Sem dados, sem seleções</small></article></section>
- <section class="panel"><div class="section-head"><div><p class="eyebrow">PIPELINE DE ANÁLISE</p><h2>Como funciona</h2></div><span class="chip">4 fases</span></div><div class="pipeline">${[['01','Cobertura integral','Todos os jogos, jogadores e mercados'],['02','Contexto e cenários','Lesões, minutos, rotações e efeitos indiretos'],['03','Ranking diário','Até 10 oportunidades, sem quotas artificiais'],['04','Validação de valor','A tua odd → probabilidade, odd justa e EV']].map(x=>`<div class="pipe-row"><b>${x[0]}</b><div><strong>${x[1]}</strong><small>${x[2]}</small></div><span>›</span></div>`).join('')}</div></section>
- <section class="panel"><div class="section-head"><div><p class="eyebrow">INTEGRIDADE DOS DADOS</p><h2>Estado das integrações</h2></div></div>${provider('Estatísticas NBA','Histórico jogo a jogo, box scores e minutos','NÃO LIGADO')}${provider('Injury reports','Disponibilidade oficial e atualizações','NÃO LIGADO')}${provider('Calendário NBA','Jogos, equipas e horários','NÃO LIGADO')}<p class="footnote">A interface está preparada. A análise automática só será ativada depois de testar a cobertura, qualidade e proveniência de cada fornecedor.</p></section>`}
+ <section class="hero"><p class="eyebrow">NBA · DAILY RESEARCH SYSTEM</p><h1>Investigar tudo.<br><em>Selecionar com critério.</em></h1><p class="sub">Análise integral dos jogos e jogadores. Até 10 oportunidades fundamentadas por dia. O sistema não inventa dados para preencher a lista.</p><div class="hero-actions"><button class="primary" data-tab="scan" id="go-scan">Abrir análise diária</button></div></section>
+ 
+ <section class="panel"><div class="section-head"><div><p class="eyebrow">PIPELINE DE ANÁLISE</p><h2>Como funciona</h2></div><span class="chip">3 módulos</span></div><div class="pipeline">${[['01','Análise diária','Jogos, jogadores, lesões, minutos e contexto'],['02','Top 10','Oportunidades estatísticas selecionadas pelo motor'],['03','Ones to Watch','Uma escolha diária de potencial surpresa, com riscos e confiança']].map(x=>`<div class="pipe-row"><b>${x[0]}</b><div><strong>${x[1]}</strong><small>${x[2]}</small></div><span>›</span></div>`).join('')}</div></section>
+ `}
 function scan(){return `<section class="page-title"><p class="eyebrow">FASE 1 · SCANNER AUTOMÁTICO</p><h1>Jogos das próximas 24 horas</h1><p class="sub">Janela móvel baseada na hora local de Portugal. O calendário é filtrado pelo horário real de cada encontro, não apenas pela data.</p></section><section class="panel"><div class="section-head"><h2>Mercados a investigar</h2><span class="chip">NBA</span></div><div class="market-grid">${Object.values(marketNames).map(m=>`<div class="market-card"><b>${m}</b><small>Player props</small></div>`).join('')}</div><div class="check-list">${['Calendário completo e estado dos jogos','Registos individuais jogo a jogo','Minutos, titularidade e rotação','Lesões: out, doubtful, questionable, probable','Cenários com e sem jogadores em dúvida','Impacto na utilização e oportunidades dos colegas','Confronto defensivo, ritmo e contexto','Amostras, outliers e qualidade dos dados'].map(x=>`<div><span>✓</span>${x}</div>`).join('')}</div><button class="primary full" id="run-scan">Analisar jogos das próximas 24 horas</button><p class="footnote">Primeira etapa: calendário ESPN, filtro exacto de 24 horas e relatório de lesões. O ranking estatístico só será criado depois de ligar a pesquisa de jogadores e os históricos ESPN por equipa.</p><div id="scan-results" class="scan-results" aria-live="polite"><p class="muted">Ainda não foram consultadas fontes.</p></div></section>
  <section class="panel"><div class="section-head"><div><p class="eyebrow">ESPN · PLAYER GAMELOG</p><h2>Pesquisar jogador</h2></div><span class="chip">ESPN</span></div>
  <p class="sub">Pesquisa um jogador e carrega os registos jogo a jogo directamente da ESPN.</p>
@@ -110,10 +113,143 @@ function scan(){return `<section class="page-title"><p class="eyebrow">FASE 1 ·
  </section><section class="panel"><p class="eyebrow">CRITÉRIO DE SELEÇÃO</p><h2>Até 10 oportunidades</h2><p class="body-copy">A lista é ordenada por qualidade estatística, estabilidade da projeção, contexto e incerteza. Se só existirem 4 oportunidades que cumpram os critérios, serão apresentadas 4.</p></section>`}
 function opportunities(){
  const unique=uniquePlayersTop(scanOpportunities,10);
- const rows=unique.map((x,i)=>{const playerStatus=scanPlayers.find(p=>p.id===x.playerId)?.status||'ESTADO DESCONHECIDO';const availability=/QUESTIONÁVEL|DUVIDOSO/.test(playerStatus)?' · CENÁRIO CONDICIONAL':'';return `<div class="source"><span><b>#${i+1} · ${escapeHtml(x.playerName)} — ${escapeHtml(x.teamName)} · ${escapeHtml(playerStatus)}${availability}</b><small>${escapeHtml(x.marketLabel)} · <b>${x.suggestedLine.toFixed(1)} ${x.direction}</b> · Índice descritivo ${x.score}/100 · Qualidade ${escapeHtml(x.quality)} · Confiança ${escapeHtml(x.confidence)}</small><small>${escapeHtml(x.explanation)}</small><small>Últimos 5: ${x.recentMean.toFixed(1)} (${x.recentSample} registos) · Últimos 10: ${x.recent10Mean.toFixed(1)} · 5 anteriores: ${x.previousMean.toFixed(1)} (${x.previousSample} registos) · Época: ${x.seasonMean.toFixed(1)} (${x.seasonSample} registos)</small><small>Resultados recentes: ${x.recentResults.map(value=>value.toFixed(1)).join(' · ')} · A favor da linha: ${x.recentHits}/${x.recentSample}</small></span><strong class="pending">${x.suggestedLine.toFixed(1)} ${x.direction}</strong></div>`;}).join('');
- return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Oportunidades</h1><p class="sub">Apenas jogadores com alterações recentes sustentadas nos dados. Não são apostas com valor confirmado.</p></section><section class="panel"><div class="notice"><b>${escapeHtml(scanAnalysisStatus)}</b><p>Históricos solicitados: ${scanAnalysisCoverage.requested} · Carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · Falhas definitivas: ${scanAnalysisCoverage.failed} · Recuperados após repetição: ${scanAnalysisCoverage.retried}</p></div>${rows||'<div class="empty-state compact"><h2>Sem oportunidades suficientemente fundamentadas</h2><p>Não foram encontrados desvios recentes que cumpram os critérios de amostra, consistência e dimensão do sinal. Não vamos preencher o Top 10 artificialmente.</p></div>'}<p class="footnote">O índice ordena desvios descritivos recentes. Não é probabilidade de acerto, linha de bookmaker nem EV. O estado de disponibilidade é apresentado junto ao jogador; os estados ESPN não excluem jogadores da base de rotação.</p></section>`;
+ const rows=unique.map((x,i)=>{
+  const player=scanPlayers.find(p=>p.id===x.playerId);
+  const playerStatus=player?.status||'';
+  const conditional=/QUESTIONÁVEL|DUVIDOSO/.test(playerStatus);
+  const photoId=String(player?.espn_id||'').replace(/\D/g,'');
+  const initials=x.playerName.split(/\s+/).filter(Boolean).slice(0,2).map(n=>n[0]).join('').toUpperCase();
+  const photo=photoId
+   ? `<img src="https://a.espncdn.com/i/headshots/nba/players/full/${photoId}.png" alt="${escapeHtml(x.playerName)}" loading="lazy" onerror="this.parentElement.classList.add('no-photo');this.remove()">`
+   : '';
+  const hitRate=x.lineHitRate===null?'N/D':(x.lineHitRate*100).toFixed(0)+'%';
+  const previousHitRate=x.previousLineHitRate===null?'N/D':(x.previousLineHitRate*100).toFixed(0)+'%';
+
+  return `<article class="opportunity-card">
+   <div class="opportunity-main">
+    <div class="player-photo ${photo?'':'no-photo'}">${photo}<span>${escapeHtml(initials)}</span></div>
+    <div class="player-info">
+     <div class="player-rank">OPORTUNIDADE #${i+1}</div>
+     <h3>${escapeHtml(x.playerName)}</h3>
+     <p>${escapeHtml(x.teamName)}${player?.position?' · '+escapeHtml(player.position):''}</p>
+     ${playerStatus?`<span class="medical-status ${conditional?'conditional':''}">${escapeHtml(playerStatus)}${conditional?' · CENÁRIO CONDICIONAL':''}</span>`:''}
+    </div>
+    <div class="opportunity-score"><strong>${x.score}</strong><small>ÍNDICE</small></div>
+   </div>
+   <div class="opportunity-pick">
+    <div><small>MERCADO</small><strong>${escapeHtml(x.marketLabel)}</strong></div>
+    <div><small>LINHA SUGERIDA</small><strong class="pick-line">${x.suggestedLine.toFixed(1)} <span>${escapeHtml(x.direction)}</span></strong></div>
+    <div><small>QUALIDADE</small><strong>${escapeHtml(x.quality)}</strong></div>
+    <div><small>CONFIANÇA</small><strong>${escapeHtml(x.confidence)}</strong></div>
+   </div>
+   <div class="opportunity-explanation">${escapeHtml(x.explanation)}</div>
+   <div class="opportunity-stats">
+    <div class="stat-box"><small>MÉDIA · ÚLTIMOS 5</small><strong>${x.recentMean.toFixed(1)}</strong><span>${x.recentSample} registos</span></div>
+    <div class="stat-box"><small>MÉDIA · ÚLTIMOS 10</small><strong>${x.recent10Mean.toFixed(1)}</strong><span>jogos recentes</span></div>
+    <div class="stat-box"><small>5 ANTERIORES</small><strong>${x.previousMean.toFixed(1)}</strong><span>${x.previousSample} registos</span></div>
+    <div class="stat-box"><small>MÉDIA DA ÉPOCA</small><strong>${x.seasonMean.toFixed(1)}</strong><span>${x.seasonSample} registos</span></div>
+   </div>
+   <div class="opportunity-detail">
+    <div class="detail-heading">RESULTADOS RECENTES</div>
+    <div class="recent-results">${x.recentResults.map(value=>`<span>${value.toFixed(1)}</span>`).join('')}</div>
+    <div class="detail-metrics">
+     <span>Tendência: <b>${x.trendHits}/${x.recentSample} (${(x.trendHitRate*100).toFixed(0)}%)</b></span>
+     <span>Mesma linha: <b>${x.lineHits}/${x.lineSample} (${hitRate})</b>${x.linePushes?' · '+x.linePushes+' pushes':''}</span>
+     <span>5 anteriores na mesma linha: <b>${x.previousLineHits}/${x.previousLineSample} (${previousHitRate})</b>${x.previousLinePushes?' · '+x.previousLinePushes+' pushes':''}</span>
+    </div>
+   </div>
+  </article>`;
+ }).join('');
+
+ return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Top 10 <em>Oportunidades</em></h1><p class="sub">Jogadores com alterações recentes sustentadas nos dados. O ranking é estatístico e não representa probabilidade de acerto ou valor confirmado.</p></section>
+ <section class="ranking-summary"><div><span>SELEÇÕES APROVADAS</span><strong>${unique.length}<small> / 10</small></strong></div><div><span>HISTÓRICOS CARREGADOS</span><strong>${scanAnalysisCoverage.loaded}</strong></div><div><span>FALHAS DEFINITIVAS</span><strong>${scanAnalysisCoverage.failed}</strong></div></section>
+ <div class="notice ranking-notice"><b>${escapeHtml(scanAnalysisStatus)}</b><p>Históricos solicitados: ${scanAnalysisCoverage.requested} · Carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · Falhas definitivas: ${scanAnalysisCoverage.failed} · Recuperados após repetição: ${scanAnalysisCoverage.retried}</p></div>
+ <section class="opportunity-list">${rows||'<div class="empty-state compact"><h2>Sem oportunidades suficientemente fundamentadas</h2><p>Não foram encontrados desvios recentes que cumpram os critérios de amostra, consistência e dimensão do sinal. Não vamos preencher o Top 10 artificialmente.</p></div>'}</section>
+ <p class="footnote">O índice ordena desvios descritivos recentes. Não é probabilidade de acerto, linha de bookmaker nem EV. Os estados médicos relevantes são apresentados junto ao jogador; a ausência de indicação não significa confirmação médica de disponibilidade.</p>`;
 }
-function validator(){return `<section class="page-title"><p class="eyebrow">FASES 3 E 4 · VALIDAÇÃO</p><h1>Validador de aposta</h1><p class="sub">Introduz a linha e a odd da Spinbetter para um mercado previamente analisado.</p></section><section class="panel"><div class="notice"><b>Motor de probabilidade ainda não ligado</b><p>Não introduzas uma probabilidade manual para obter um veredicto. A probabilidade terá de vir do modelo validado e associado à análise selecionada.</p></div><label>Jogador<input id="v-player" placeholder="Selecionar oportunidade analisada" /></label><div class="two"><label>Mercado<select id="v-market">${Object.entries(marketNames).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select></label><label>Linha da Spinbetter<input id="v-line" type="number" step="0.5" placeholder="Ex.: 24.5" /></label></div><label>Odd decimal<input id="v-odds" type="number" min="1.01" step="0.01" placeholder="Ex.: 1.90" /></label><button class="primary full" id="save-odds">Guardar dados da cotação</button><p class="footnote">Guardar a cotação não significa recomendar a aposta. O veredicto só será calculado quando existir uma previsão válida para o mesmo jogador, mercado e linha.</p></section><section class="panel"><h2>Critérios do veredicto</h2><div class="verdict-row"><b>VALOR</b><span>EV positivo após ajuste conservador de incerteza.</span></div><div class="verdict-row"><b>SEM VALOR</b><span>Preço insuficiente face à probabilidade estimada.</span></div><div class="verdict-row"><b>DADOS INSUFICIENTES</b><span>Previsão, contexto ou cotação sem validação suficiente.</span></div></section>`}
+function validator(){return `
+<section class="page-title">
+ <p class="eyebrow">EDGE NBA AI · DAILY SPECIAL PICK</p>
+ <h1>Ones to <em>Watch</em></h1>
+ <p class="sub">Uma escolha diária de potencial surpresa, com fundamentação, confiança e riscos.</p>
+</section>
+<section class="panel">
+ <div class="section-head"><div><p class="eyebrow">DAILY SELECTION</p><h2>Escolha do dia</h2></div><span class="chip">1 PICK / DIA</span></div>
+ <div id="otw-current" class="scan-results"><p class="muted">A carregar a escolha diária...</p></div>
+ <button class="secondary full" id="refresh-ones-to-watch">Atualizar dados</button>
+ <p class="footnote">A escolha fica guardada por data. Atualizar não altera uma seleção já registada.</p>
+</section>
+<section class="panel">
+ <div class="section-head"><div><p class="eyebrow">TRACK RECORD</p><h2>Escolhas anteriores</h2></div></div>
+ <div id="otw-history" class="scan-results"><p class="muted">A carregar histórico...</p></div>
+</section>`}
+
+function otwEscape(value:unknown):string {
+ return escapeHtml(String(value??'—'));
+}
+function otwList(items:unknown,empty:string):string {
+ if(!Array.isArray(items)||!items.length)return `<p class="muted">${empty}</p>`;
+ return `<ul class="rules">${items.map(x=>`<li>${otwEscape(x)}</li>`).join('')}</ul>`;
+}
+async function loadOnesToWatch(){
+ const target=document.querySelector<HTMLDivElement>('#otw-current');
+ const historyTarget=document.querySelector<HTMLDivElement>('#otw-history');
+ const button=document.querySelector<HTMLButtonElement>('#refresh-ones-to-watch');
+ if(!target)return;
+ if(button){button.disabled=true;button.textContent='A atualizar...';}
+ target.innerHTML='<p class="muted">A consultar a seleção diária...</p>';
+
+ try{
+  const response=await fetch(`${API_BASE}/api/ones-to-watch`,{credentials:'include'});
+  const data=await response.json() as {success?:boolean;cached?:boolean;pick?:Record<string,any>;error?:string;message?:string};
+  const p=data.pick;
+  if(!response.ok||!p){
+   target.innerHTML=`<div class="notice"><b>Escolha diária indisponível</b><p>${otwEscape(data.message||data.error||`HTTP ${response.status}`)}</p><p class="footnote">Confirma se a D1 local contém históricos suficientes.</p></div>`;
+  }else{
+   const market=marketNames[String(p.market)]||p.marketLabel||p.market||'—';
+   const absences=[...(Array.isArray(p.confirmedAbsences)?p.confirmedAbsences:[]),...(Array.isArray(p.absentTeammates)?p.absentTeammates:[])];
+   target.innerHTML=`
+   <article class="opportunity-card">
+    <div class="section-head"><span class="chip">ESCOLHA DIÁRIA</span><span class="chip">${otwEscape(p.confidence)}</span></div>
+    <p class="eyebrow">${otwEscape(p.teamName)}</p>
+    <h2>${otwEscape(p.playerName)}</h2>
+    <div class="ranking-summary">
+     <div><span>MERCADO</span><strong>${otwEscape(market)}</strong></div>
+     <div><span>DIREÇÃO</span><strong>${otwEscape(p.direction)}</strong></div>
+     <div><span>LINHA</span><strong>${otwEscape(p.suggestedLine)}</strong></div>
+    </div>
+    <div class="source-row"><span>Índice interno</span><b>${otwEscape(p.score)}/100</b></div>
+    <div class="source-row"><span>Média recente</span><b>${otwEscape(p.recentMean)}</b></div>
+    <div class="source-row"><span>Média da época</span><b>${otwEscape(p.seasonMean)}</b></div>
+    <div class="source-row"><span>Amostra contextual</span><b>${otwEscape(p.contextualSample??0)} jogos</b></div>
+    <h3>Fundamentação</h3>${otwList(p.reasons,'Sem fundamentação adicional.')}
+    <h3>Ausências consideradas</h3>${otwList(absences,'Não existem ausências contextuais registadas.')}
+    <h3>Riscos</h3>${otwList(p.risks,'Sem riscos adicionais registados.')}
+    <h3>Limitações</h3>${otwList(p.limitations,'Sem limitações adicionais registadas.')}
+    <p class="footnote">${data.cached?'Escolha já guardada para esta data.':'Escolha guardada nesta consulta.'}</p>
+   </article>`;
+  }
+ }catch(error){
+  target.innerHTML=`<div class="notice"><b>Falha na ligação</b><p>${otwEscape(error)}</p></div>`;
+ }
+
+ if(historyTarget){
+  try{
+   const response=await fetch(`${API_BASE}/api/ones-to-watch/history?limit=15`,{credentials:'include'});
+   const data=await response.json() as {items?:Array<Record<string,any>>;history?:Array<Record<string,any>>};
+   const items=data.items||data.history||[];
+   historyTarget.innerHTML=response.ok&&items.length?items.map(p=>`
+    <div class="source"><span><b>${otwEscape(p.selection_date||p.selectionDate)} · ${otwEscape(p.player_name||p.playerName)}</b>
+    <small>${otwEscape(marketNames[String(p.market)]||p.market)} · ${otwEscape(p.direction)} ${otwEscape(p.suggested_line??p.suggestedLine)}</small></span>
+    <strong>${otwEscape(p.confidence)}</strong></div>`).join(''):'<p class="muted">Ainda não existem escolhas anteriores.</p>';
+  }catch{
+   historyTarget.innerHTML='<p class="muted">Não foi possível carregar o histórico.</p>';
+  }
+ }
+ if(button){button.disabled=false;button.textContent='Atualizar dados';}
+}
+
+
 function history(){return `<section class="page-title"><p class="eyebrow">CONTROLO DE DESEMPENHO</p><h1>Histórico</h1><p class="sub">Registo de previsões, linhas, odds introduzidas, resultados e calibração do modelo.</p></section><section class="status-grid"><article class="metric"><span>Previsões registadas</span><strong>0</strong></article><article class="metric"><span>Taxa de acerto</span><strong>—</strong></article><article class="metric"><span>ROI observado</span><strong>—</strong></article></section><section class="empty-state compact"><h2>Sem histórico disponível</h2><p>Os resultados só serão calculados com previsões guardadas antes dos jogos e resultados oficiais posteriores. O modelo será avaliado fora da amostra.</p></section>`}
 function settings(){return `<section class="page-title"><p class="eyebrow">CONFIGURAÇÃO</p><h1>Fontes e segurança</h1><p class="sub">A aplicação é privada e protegida por sessão.</p></section><section class="panel"><h2>Autenticação</h2><p class="body-copy">Acesso protegido pelo Worker Cloudflare. A sessão expira após 7 dias.</p><div class="source-row"><span>Proteção de acesso</span><b class="pending">ATIVA</b></div></section><section class="panel"><h2>Fornecedores de dados</h2>${provider('NBA statistics','Dados históricos e box scores','POR CONFIGURAR')}${provider('Injury report','Estado oficial dos jogadores','POR CONFIGURAR')}<button class="secondary full" id="check-provider">Verificar configuração</button></section><section class="panel"><h2>Política de integridade</h2><ul class="rules"><li>Guardar fonte e timestamp de cada registo.</li><li>Separar factos confirmados de cenários condicionais.</li><li>Não confundir hit rate histórico com probabilidade futura.</li><li>Não declarar EV sem odd válida e previsão calibrada.</li><li>Registar versão do modelo e dados usados.</li></ul></section>`}
 function provider(name:string,desc:string,status:string){return `<div class="source"><span><b>${name}</b><small>${desc}</small></span><strong class="pending">${status}</strong></div>`}
@@ -133,13 +269,16 @@ async function runScan(){
   dates.push(`${day.getFullYear()}${String(day.getMonth()+1).padStart(2,'0')}${String(day.getDate()).padStart(2,'0')}`);
  }
  try{
-  // Atualizar calendário e IDs dos plantéis ESPN antes de consultar o D1.
-  const syncResponses = await Promise.all([
-   fetch(`${API_BASE}/api/espn/games`,{credentials:'include'}),
-   fetch(`${API_BASE}/api/espn/sync-player-ids`,{credentials:'include'})
-  ]);
-  for (const syncResponse of syncResponses) {
-   if (!syncResponse.ok) { const detail = await syncResponse.json().catch(()=>null) as {error?:string}|null; throw new Error(detail?.error || `Sincronização ESPN: HTTP ${syncResponse.status}`); }
+  // Em produção, atualizar calendário e IDs ESPN.
+  // Em desenvolvimento local, usar os dados já existentes na D1 sem escrever na produção.
+  if (!viteEnv?.DEV) {
+   const syncResponses = await Promise.all([
+    fetch(`${API_BASE}/api/espn/games`,{credentials:'include'}),
+    fetch(`${API_BASE}/api/espn/sync-player-ids`,{credentials:'include'})
+   ]);
+   for (const syncResponse of syncResponses) {
+    if (!syncResponse.ok) { const detail = await syncResponse.json().catch(()=>null) as {error?:string}|null; throw new Error(detail?.error || `Sincronização ESPN: HTTP ${syncResponse.status}`); }
+   }
   }
   const scoreboardResponses=await Promise.all(dates.map(async date=>{
    const response=await fetch(`${API_BASE}/api/espn/scoreboard?date=${date}`,{credentials:'include'});
@@ -184,13 +323,11 @@ async function runScan(){
    const roster=Array.isArray(rosterPayload.players)?rosterPayload.players:[];
    scanPlayers=roster.filter(player=>player.rotation_eligible===true).map(player=>({
     ...player,
-    status:!injuryReportAvailable?'ESTADO DESCONHECIDO':player.espn_id?(injuryStatuses.get(player.espn_id)||'SEM REGISTO NO RELATÓRIO ESPN'):'ID ESPN NÃO MAPEADO'
+    status:injuryReportAvailable&&player.espn_id
+     ? injuryStatuses.get(player.espn_id)||''
+     : ''
    }));
    scanRosterStatus=`${scanPlayers.length} jogadores de rotação identificados (${rosterPayload.meta?.rotation_count??scanPlayers.length} elegíveis) em ${rosterPayload.meta?.teams_found??0}/${rosterPayload.meta?.teams_requested??teamNames.length} equipas`;
-   const statusCounts=new Map<string,number>();
-   for(const player of scanPlayers){const status=player.status||'ESTADO DESCONHECIDO';statusCounts.set(status,(statusCounts.get(status)||0)+1);}
-   if(statusCounts.size)scanRosterStatus+=`. Estados: ${[...statusCounts].map(([status,count])=>`${status}: ${count}`).join(', ')}`;
-   scanAvailabilityRows=scanPlayers.filter(player=>player.status!=='DISPONÍVEL').map(player=>`<div class="source"><span><b>${escapeHtml(player.name)}</b><small>${escapeHtml(player.team_name)} · ${Number(player.recent10_avg_minutes||0).toFixed(1)} min médios nos últimos 10 jogos</small></span><strong class="pending">${escapeHtml(player.status||'ESTADO DESCONHECIDO')}</strong></div>`).join('');
    if(rosterPayload.missing_teams?.length)scanRosterStatus+=`. Equipas sem correspondência: ${rosterPayload.missing_teams.join(', ')}`;
   }
   // Remove IDs repetidos antes de pedir históricos: cada jogador deve ser contabilizado uma única vez.
@@ -300,7 +437,7 @@ async function runScan(){
      const rows=adaptEspnGamelog({data:result.data});
      if(!rows.length){scanAnalysisCoverage.failed++;addFailureReason('Histórico recebido, mas sem linhas válidas após adaptação');continue;}
      scanAnalysisCoverage.loaded++;
-     const status=player.status||'ESTADO DESCONHECIDO';
+     const status=player.status||'';
      if(!/LESIONADO|SUSPENSO|INATIVO|OUT/i.test(status)) candidates.push(...rankPlayerTrends(player,rows));
     }catch(error){
      scanAnalysisCoverage.failed++;
@@ -317,7 +454,7 @@ async function runScan(){
   scanOpportunities=candidates.sort((a,b)=>b.score-a.score);
   scanAnalysisStatus=scanAnalysisCoverage.loaded===0?'Não foi possível carregar históricos ESPN válidos.':`Análise concluída: ${scanOpportunities.length} candidatos seleccionados após avaliar os históricos disponíveis.`;
   const failureSummary = [...failureReasons.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([reason,count])=>`<p>${count}x — ${escapeHtml(reason)}</p>`).join('');
-  target.innerHTML=`<div class="notice"><b>${scanEvents.length} jogos encontrados nas próximas 24 horas</b><p>${escapeHtml(scanRosterStatus)}</p><p>${escapeHtml(scanInjuryText)}</p><p>${escapeHtml(scanAnalysisStatus)}</p><p>Históricos: ${scanAnalysisCoverage.loaded} carregados · ${scanAnalysisCoverage.noHistory} sem registos nesta época · ${scanAnalysisCoverage.failed} falhas definitivas · ${scanAnalysisCoverage.retried} recuperados após repetição.</p>${scanAvailabilityRows ? `<hr><b>Jogadores de rotação indisponíveis ou em dúvida</b>${scanAvailabilityRows}` : ''}${failureSummary ? `<hr><b>Principais causas das falhas</b>${failureSummary}` : ''}</div><button class="primary full" id="open-opportunities">Ver shortlist de oportunidades (${scanOpportunities.length})</button>`;
+  target.innerHTML=`<div class="notice"><b>${scanEvents.length} jogos encontrados nas próximas 24 horas</b><p>${escapeHtml(scanRosterStatus)}</p><p>${escapeHtml(scanInjuryText)}</p><p>${escapeHtml(scanAnalysisStatus)}</p><p>Históricos: ${scanAnalysisCoverage.loaded} carregados · ${scanAnalysisCoverage.noHistory} sem registos nesta época · ${scanAnalysisCoverage.failed} falhas definitivas · ${scanAnalysisCoverage.retried} recuperados após repetição.</p>${failureSummary ? `<hr><b>Principais causas das falhas</b>${failureSummary}` : ''}</div><button class="primary full" id="open-opportunities">Ver shortlist de oportunidades (${scanOpportunities.length})</button>`;
   document.querySelector('#open-opportunities')?.addEventListener('click',()=>{active='opportunities';render();});
  }catch(error){
   target.innerHTML=`<div class="notice"><b>Não foi possível concluir o scanner</b><p>${escapeHtml(String(error))}</p><p>Não foram fabricados jogos nem resultados para datas cuja consulta falhou.</p></div>`;
@@ -393,8 +530,6 @@ async function loadEspnGamelog(player:ESPNPlayer){
 }
 
 function escapeHtml(value:string){return value.replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]||ch));}
-
-function saveOdds(){const player=(document.querySelector('#v-player') as HTMLInputElement)?.value.trim();const line=(document.querySelector('#v-line') as HTMLInputElement)?.value;const odds=(document.querySelector('#v-odds') as HTMLInputElement)?.value;if(!player||!line||!odds||Number(odds)<=1){alert('Preenche jogador, linha e odd decimal válida.');return;}alert('Dados recebidos nesta sessão. Ainda não existe previsão validada associada, por isso não é possível emitir um veredicto de valor.');}
 
 async function startApp(){
  try {

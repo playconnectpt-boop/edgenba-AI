@@ -1,3 +1,5 @@
+import { selectOnesToWatch, type OnesToWatchCandidate } from '../../src/ones-to-watch';
+
 export interface Env {
   DB: any;
   APP_ORIGIN?: string;
@@ -167,6 +169,246 @@ const worker: WorkerHandler = {
       providers: { espn: 'public-endpoints-configured_not-yet-validated-in-production', database: env.DB ? 'bound' : 'not-bound' },
       productionReady: false
     }, 200, env);
+
+
+    if (url.pathname === '/api/ones-to-watch' && request.method === 'GET') {
+      if (!env.DB) return json({ error: 'd1_database_not_bound' }, 503, env);
+
+      try {
+        const parts = new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'Europe/Lisbon',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit'
+        }).formatToParts(new Date());
+
+        const part = (type: string) => parts.find(item => item.type === type)?.value || '';
+        const selectionDate = `${part('year')}-${part('month')}-${part('day')}`;
+        const season = nbaSeasonForDate(new Date(`${selectionDate}T12:00:00Z`));
+
+        const readSaved = async () => {
+          const saved = await env.DB.prepare(`
+            SELECT selection_date, player_id, player_name, team_name, market,
+              direction, suggested_line, score, confidence, explanation_json,
+              source_data_json, engine_version, generated_at
+            FROM ones_to_watch_daily
+            WHERE selection_date = ?
+          `).bind(selectionDate).first() as any;
+
+          if (!saved) return null;
+
+          return {
+            date: saved.selection_date,
+            playerId: saved.player_id,
+            playerName: saved.player_name,
+            teamName: saved.team_name,
+            market: saved.market,
+            direction: saved.direction,
+            suggestedLine: Number(saved.suggested_line),
+            score: Number(saved.score),
+            confidence: saved.confidence,
+            explanation: JSON.parse(saved.explanation_json),
+            source: JSON.parse(saved.source_data_json),
+            engineVersion: saved.engine_version,
+            generatedAt: saved.generated_at
+          };
+        };
+
+        const existing = await readSaved();
+        if (existing) return json({ success: true, cached: true, pick: existing }, 200, env);
+
+        const result = await env.DB.prepare(`
+          WITH eligible_players AS (
+            SELECT
+              p.player_id,
+              p.name AS player_name,
+              COALESCE(ps.team_name, p.team_name, '') AS team_name,
+              p.position
+            FROM players p
+            JOIN player_seasons ps ON ps.player_id = p.player_id
+            WHERE ps.season = ?
+              AND EXISTS (
+                SELECT 1
+                FROM player_game_stats history
+                WHERE history.player_id = p.player_id
+                  AND history.season IN (?, ?)
+                  AND history.minutes > 0
+                GROUP BY history.player_id
+                HAVING COUNT(*) >= 3
+              )
+          )
+          SELECT
+            ep.player_id AS playerId,
+            ep.player_name AS playerName,
+            ep.team_name AS teamName,
+            ep.position AS position,
+            s.game_date AS date,
+            s.minutes AS minutes,
+            s.points AS points,
+            s.rebounds AS rebounds,
+            s.assists AS assists,
+            s.three_pointers_made AS threes,
+            (COALESCE(s.points, 0) + COALESCE(s.rebounds, 0) + COALESCE(s.assists, 0)) AS pra,
+            s.three_pointers_attempted AS threePointAttempts
+          FROM eligible_players ep
+          JOIN player_game_stats s ON s.player_id = ep.player_id
+          WHERE s.season IN (?, ?)
+            AND s.game_date < ?
+            AND s.minutes > 0
+          ORDER BY ep.player_id, s.game_date DESC
+          LIMIT 12000
+        `).bind(
+          season,
+          season - 1,
+          season,
+          season - 1,
+          season,
+          selectionDate
+        ).all();
+
+        const grouped = new Map<string, OnesToWatchCandidate>();
+
+        for (const row of (result.results || []) as any[]) {
+          const playerId = String(row.playerId);
+          let candidate = grouped.get(playerId);
+
+          if (!candidate) {
+            candidate = {
+              playerId,
+              playerName: String(row.playerName),
+              teamName: String(row.teamName || ''),
+              position: row.position == null ? undefined : String(row.position),
+              rows: []
+            };
+            grouped.set(playerId, candidate);
+          }
+
+          candidate.rows.push({
+            date: String(row.date),
+            minutes: Number(row.minutes),
+            points: Number(row.points ?? 0),
+            rebounds: Number(row.rebounds ?? 0),
+            assists: Number(row.assists ?? 0),
+            threes: Number(row.threes ?? 0),
+            threePointAttempts: Number(row.threePointAttempts ?? 0),
+            pra: Number(row.pra ?? 0)
+          });
+        }
+
+        const pick = selectOnesToWatch(Array.from(grouped.values()));
+
+        if (!pick) {
+          return json({
+            success: false,
+            error: 'insufficient_player_statistics',
+            date: selectionDate,
+            season,
+            message: 'Ainda não existem dados estatísticos válidos suficientes para gerar uma seleção.'
+          }, 422, env);
+        }
+
+        const explanation = {
+          marketLabel: pick.marketLabel,
+          recentMean: pick.recentMean,
+          seasonMean: pick.seasonMean,
+          contextualMean: pick.contextualMean,
+          recentMinutes: pick.recentMinutes,
+          baselineMinutes: pick.baselineMinutes,
+          contextualSample: pick.contextualSample,
+          absentTeammates: pick.absentTeammates,
+          confirmedAbsences: pick.confirmedAbsences,
+          reasons: pick.reasons,
+          risks: pick.risks,
+          limitations: [
+            ...pick.limitations,
+            'A análise atual não integra ainda o relatório de lesões ESPN nem o histórico de produção com e sem colegas ausentes.',
+            'O histórico pode combinar jogos de duas épocas; alterações de equipa ou função podem limitar a comparação.'
+          ]
+        };
+
+        const source = {
+          provider: 'ESPN / Cloudflare D1',
+          season,
+          seasonsIncluded: [season, season - 1],
+          candidateCount: grouped.size,
+          playerSample: grouped.get(pick.playerId)?.rows.length || 0
+        };
+
+        await env.DB.prepare(`
+          INSERT OR IGNORE INTO ones_to_watch_daily (
+            selection_date, player_id, player_name, team_name, market,
+            direction, suggested_line, score, confidence,
+            explanation_json, source_data_json, engine_version
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          selectionDate,
+          pick.playerId,
+          pick.playerName,
+          pick.teamName,
+          pick.market,
+          pick.direction,
+          pick.suggestedLine,
+          pick.score,
+          pick.confidence,
+          JSON.stringify(explanation),
+          JSON.stringify(source),
+          'ones-to-watch-v1'
+        ).run();
+
+        const saved = await readSaved();
+        if (!saved) throw new Error('A seleção diária não ficou persistida em D1.');
+
+        return json({ success: true, cached: false, pick: saved }, 200, env);
+      } catch (error) {
+        return json({
+          error: 'ones_to_watch_generation_failed',
+          detail: String(error)
+        }, 500, env);
+      }
+    }
+
+    if (url.pathname === '/api/ones-to-watch/history' && request.method === 'GET') {
+      if (!env.DB) return json({ error: 'd1_database_not_bound' }, 503, env);
+
+      const requestedLimit = Number(url.searchParams.get('limit') || 30);
+      const limit = Number.isInteger(requestedLimit)
+        ? Math.max(1, Math.min(60, requestedLimit))
+        : 30;
+
+      try {
+        const result = await env.DB.prepare(`
+          SELECT selection_date, player_id, player_name, team_name, market,
+            direction, suggested_line, score, confidence, explanation_json,
+            source_data_json, engine_version, generated_at
+          FROM ones_to_watch_daily
+          ORDER BY selection_date DESC
+          LIMIT ?
+        `).bind(limit).all();
+
+        const history = (result.results || []).map((row: any) => ({
+          date: row.selection_date,
+          playerId: row.player_id,
+          playerName: row.player_name,
+          teamName: row.team_name,
+          market: row.market,
+          direction: row.direction,
+          suggestedLine: Number(row.suggested_line),
+          score: Number(row.score),
+          confidence: row.confidence,
+          explanation: JSON.parse(row.explanation_json),
+          source: JSON.parse(row.source_data_json),
+          engineVersion: row.engine_version,
+          generatedAt: row.generated_at
+        }));
+
+        return json({ success: true, history }, 200, env);
+      } catch (error) {
+        return json({
+          error: 'ones_to_watch_history_failed',
+          detail: String(error)
+        }, 500, env);
+      }
+    }
 
     if (url.pathname === '/api/espn/scoreboard') {
       const date = url.searchParams.get('date') || new Date().toISOString().slice(0, 10).replaceAll('-', '');

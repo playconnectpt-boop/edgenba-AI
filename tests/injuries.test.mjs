@@ -40,7 +40,6 @@ test('maps ESPN injury statuses to the expected labels', () => {
     ['1001', 'LESIONADO'],
     ['1002', 'QUESTIONÁVEL'],
     ['1003', 'DUVIDOSO'],
-    ['1004', 'PROVÁVEL'],
     ['1005', 'SUSPENSO'],
     ['1006', 'INATIVO']
   ]);
