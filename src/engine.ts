@@ -259,7 +259,6 @@ export function uniquePlayersTop(candidates: TrendCandidate[], limit = 10): Tren
   const ordered = [...candidates].sort((a, b) =>
     b.score - a.score ||
     b.confidencePercent - a.confidencePercent ||
-    (a.direction === 'OVER' ? -1 : 1) - (b.direction === 'OVER' ? -1 : 1) ||
     a.playerName.localeCompare(b.playerName)
   );
   for (const candidate of ordered) {
@@ -323,17 +322,37 @@ export function rankPlayerTrends(
     const recentWeight = clamp(0.55 - 0.25 * divergence, 0.25, 0.55);
     const target = recentWeight * recentMean + (1 - recentWeight) * baseline;
 
-    // Search meaningful half-point lines close to the forecast, never UNDER 0.5.
-    // This avoids automatically selecting an extremely low line to inflate hit rates.
+    // Exclude low-value lines before probability/ranking calculations.
+    // OVER 0.5 and UNDER 0.5/1.5 are not eligible for the TOP 10.
+    const MIN_OVER_LINE = 1.5;
+    const MIN_UNDER_LINE = 2.5;
     const centralLine = Math.floor(target) + 0.5;
     const lineOptions = [...new Set([
       centralLine - 1, centralLine, centralLine + 1
-    ])].filter(line => line >= 0.5);
+    ])].filter(line => line >= MIN_OVER_LINE);
     const candidates: TrendCandidate[] = [];
+
+    // UNDER on three-pointers requires actual attempt data and meaningful volume.
+    // Missing 3PA is unknown, never interpreted as zero.
+    const recent10Rows = last10.slice(0, 10);
+    const knownThreePointAttempts = recent10Rows
+      .map(row => row.threePointAttempts)
+      .filter((value): value is number =>
+        typeof value === 'number' && Number.isFinite(value) && value >= 0
+      );
+    const threePointAttemptCoverage = knownThreePointAttempts.length / Math.max(1, recent10Rows.length);
+    const averageThreePointAttempts = knownThreePointAttempts.length
+      ? average(knownThreePointAttempts)
+      : null;
+    const underThreesEligible =
+      threePointAttemptCoverage >= 0.8 &&
+      averageThreePointAttempts !== null &&
+      averageThreePointAttempts >= 4;
 
     for (const line of lineOptions) {
       for (const direction of ['OVER', 'UNDER'] as Direction[]) {
-        if (direction === 'UNDER' && line <= 0.5) continue;
+        if (direction === 'UNDER' && line < MIN_UNDER_LINE) continue;
+        if (market === 'threes' && direction === 'UNDER' && !underThreesEligible) continue;
         const recentHits = hits(recentValues, line, direction);
         const tenHits = hits(tenValues, line, direction);
         const seasonHits = hits(seasonValues, line, direction);
@@ -403,8 +422,9 @@ export function rankPlayerTrends(
     }
     // Only the strongest line/direction per market, to avoid trivial variants.
     candidates.sort((a, b) =>
-      b.score - a.score || b.confidencePercent - a.confidencePercent ||
-      (a.direction === 'OVER' ? -1 : 1) - (b.direction === 'OVER' ? -1 : 1)
+      b.score - a.score ||
+      b.confidencePercent - a.confidencePercent ||
+      a.playerName.localeCompare(b.playerName)
     );
     if (candidates.length) output.push(candidates[0]);
   }

@@ -99,8 +99,10 @@ test('market activity thresholds are proportional to available sample', () => {
     [20,20,20,20,20,20],
     [2,2,2,2,2,2],
     [1,1,1,1,1,1],
-    [1,1,1,1,0,0]
+    [3,3,3,3,0,0]
   );
+  // Supply real 3PA data: UNDER threes must not be inferred when attempts are unknown.
+  games.forEach(game => { game.threePointAttempts = 5; });
   const trends = rankPlayerTrends({ id: 'p-proportional', name: 'Proportional' }, games);
 
   assert.ok(trends.some(item => item.market === 'points'));
