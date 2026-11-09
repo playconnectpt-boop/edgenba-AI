@@ -178,6 +178,10 @@ export type TrendCandidate = {
   explanation: string;
   quality: 'EXCELENTE' | 'FORTE' | 'MODERADA' | 'FRACA';
   confidence: 'LIMITADA' | 'BAIXA' | 'MODERADA' | 'ALTA';
+  /** True only when the candidate meets every TOP 7 selection gate. */
+  eligibleForTop: boolean;
+  /** Transparent reason when the candidate is shown only as an EXTRA. */
+  extraReason?: string;
 };
 
 type Direction = 'OVER';
@@ -260,7 +264,16 @@ export function uniquePlayersTop(candidates: TrendCandidate[], limit = 10): Tren
   const teams = new Map<string, number>();
   const games = new Map<string, number>();
 
+  const isTopEligible = (candidate: TrendCandidate) =>
+    candidate.eligibleForTop ?? (
+      Number.isFinite(candidate.probability) && candidate.probability >= 60
+    );
+
+  // TOP-qualified candidates always precede Extras. Extras are real OVER
+  // candidates that failed one or more priority gates; they are never
+  // promoted into the TOP 7 merely to fill the list.
   const ordered = [...candidates].sort((a, b) =>
+    Number(isTopEligible(b)) - Number(isTopEligible(a)) ||
     b.score - a.score ||
     b.confidencePercent - a.confidencePercent ||
     a.playerName.localeCompare(b.playerName)
@@ -268,7 +281,7 @@ export function uniquePlayersTop(candidates: TrendCandidate[], limit = 10): Tren
 
   for (const candidate of ordered) {
     if (candidate.direction !== 'OVER') continue;
-    if (!Number.isFinite(candidate.probability) || candidate.probability < 60) continue;
+    if (!Number.isFinite(candidate.probability)) continue;
 
     const player = candidate.playerId || candidate.playerName.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     const team = candidate.teamName.trim().toLowerCase();
@@ -320,7 +333,8 @@ export function rankPlayerTrends(
 
     const rule = ACTIVITY[market];
     const activityHits = tenValues.filter(value => value >= rule.threshold).length;
-    if (activityHits < Math.ceil(tenValues.length * rule.requiredOf10 / 10)) continue;
+    const activityRequired = Math.ceil(tenValues.length * rule.requiredOf10 / 10);
+    const activityEligible = activityHits >= activityRequired;
 
     const recentMean = average(recentValues);
     const recent10Mean = average(tenValues);
@@ -340,9 +354,14 @@ export function rankPlayerTrends(
     for (let line = firstLine; line <= target + 1 + 1e-9; line += 1) {
       if (line >= MIN_OVER_LINE && line >= recentMean) lineOptions.push(line);
     }
-    if (!lineOptions.length) continue;
-
-    const line = lineOptions[lineOptions.length - 1];
+    // If no line exists inside the priority interval, retain the smallest
+    // half-point OVER line at/above the recent mean as an EXTRA candidate.
+    // This preserves the user's line floor without pretending it is a TOP pick.
+    const lineInPriorityRange = lineOptions.length > 0;
+    const fallbackLine = Math.max(MIN_OVER_LINE, Math.ceil(recentMean - 0.5) + 0.5);
+    const line = lineInPriorityRange
+      ? lineOptions[lineOptions.length - 1]
+      : fallbackLine;
     const direction: Direction = 'OVER';
     const candidates: TrendCandidate[] = [];
     const recentHits = hits(recentValues, line, direction);
@@ -359,7 +378,18 @@ export function rankPlayerTrends(
           0.20 * shrink(seasonHits, seasonValues.length)
         );
         const calibrated = calibrateProbability(rawProbability, market, options.calibration);
-        if (calibrated.probability < 60) continue;
+        const probabilityEligible = calibrated.probability >= 60;
+        const eligibleForTop = activityEligible && lineInPriorityRange && probabilityEligible;
+        const extraReasons: string[] = [];
+        if (!activityEligible) {
+          extraReasons.push(`Atividade abaixo do mínimo (${activityHits}/${tenValues.length}; mínimo ${activityRequired})`);
+        }
+        if (!lineInPriorityRange) {
+          extraReasons.push('Linha fora do intervalo prioritário de ±1 ponto');
+        }
+        if (!probabilityEligible) {
+          extraReasons.push('Probabilidade estimada inferior a 60%');
+        }
 
         const minutesRatio = minutesRecent !== null && minutesSeason !== null
           ? minutesRecent / Math.max(1, minutesSeason) : null;
@@ -400,6 +430,8 @@ export function rankPlayerTrends(
           seasonSample: seasonValues.length, recentResults: [...recentValues],
           minutesRecent, minutesSeason, quality: qualityFor(score),
           confidence: confidenceFor(confidencePercent),
+          eligibleForTop,
+          ...(extraReasons.length ? { extraReason: extraReasons.join(' · ') } : {}),
           explanation: `Últimos 5: ${recentMean.toFixed(1)}; últimos 10: ${recent10Mean.toFixed(1)}; ` +
             `época: ${seasonMean.toFixed(1)} (mediana ${seasonMedian.toFixed(1)}). ` +
             `${direction} ${line.toFixed(1)}: ${recentHits}/${recentValues.length} nos últimos 5, ` +

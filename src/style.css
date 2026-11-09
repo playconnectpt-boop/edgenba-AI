@@ -923,3 +923,94 @@ input, select {
     height: 37px;
   }
 }
+
+
+/* TOP 10 — EXTRA CARDS: clearly secondary, never confused with priority picks */
+.ranking-section-title {
+  padding: 5px 2px 0;
+  margin: 8px 0 -2px;
+}
+.ranking-section-title h2 {
+  margin: 0;
+  color: var(--green);
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 25px;
+  letter-spacing: .8px;
+}
+.ranking-section-title p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.ranking-section-title.extras-heading {
+  margin-top: 22px;
+  padding: 15px 17px;
+  border: 1px solid #66512c;
+  border-radius: 13px;
+  background: linear-gradient(110deg, #211c12, #101722 75%);
+}
+.ranking-section-title.extras-heading h2 {
+  color: #f0c36c;
+}
+.opportunity-card.extra-card {
+  border-color: #62502f;
+  background:
+    radial-gradient(ellipse at 0 0, #d6a64b0b, transparent 48%),
+    linear-gradient(145deg, #151d28, #0b121b);
+  box-shadow: inset 3px 0 0 #b58a42, 0 10px 28px #0004;
+}
+.opportunity-card.extra-card:hover {
+  border-color: #a78345;
+  box-shadow: inset 3px 0 0 #d0a65a, 0 12px 32px #0006;
+}
+.extra-card .player-rank.extra-rank {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 5px 8px;
+  margin: 0 0 7px;
+  border: 1px solid #80653a;
+  border-radius: 5px;
+  background: #b58a4218;
+  color: #f0c36c;
+  font-size: 8px;
+  letter-spacing: 1.25px;
+}
+.extra-card .opportunity-score {
+  border-color: #80653a;
+  background: #b58a4210;
+  box-shadow: none;
+}
+.extra-card .opportunity-score strong {
+  color: #f0c36c;
+}
+.extra-card .opportunity-pick .pick-line,
+.extra-card .stat-box strong {
+  color: #e7c27c;
+}
+.extra-disclaimer {
+  display: grid;
+  gap: 5px;
+  margin-top: 14px;
+  padding: 11px 13px;
+  border: 1px solid #6b5735;
+  border-radius: 9px;
+  background: linear-gradient(100deg, #2a2114, #171d25);
+}
+.extra-disclaimer strong {
+  color: #f0c36c;
+  font-size: 9px;
+  letter-spacing: 1px;
+}
+.extra-disclaimer span {
+  color: #c3b69c;
+  font-size: 10px;
+  line-height: 1.55;
+}
+@media (max-width: 600px) {
+  .ranking-section-title.extras-heading { padding: 12px; }
+  .ranking-section-title h2 { font-size: 22px; }
+  .extra-disclaimer { padding: 10px; }
+}

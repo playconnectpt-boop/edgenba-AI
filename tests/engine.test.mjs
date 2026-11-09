@@ -143,7 +143,7 @@ test('market activity thresholds are proportional to available sample', () => {
   assert.ok(trends.some(item => item.market === 'threes'));
 });
 
-test('activity filter is market-specific', () => {
+test('activity filter is market-specific and retains below-threshold markets as Extras', () => {
   const games = rows(
     [30,30,30,30,0,30,30,30,30,30],
     Array(10).fill(0),
@@ -153,7 +153,10 @@ test('activity filter is market-specific', () => {
   const trends = rankPlayerTrends({ id: 'p-filter', name: 'Filter' }, games);
 
   assert.ok(trends.some(item => item.market === 'points'));
-  assert.equal(trends.some(item => item.market === 'rebounds'), false);
+  const rebounds = trends.find(item => item.market === 'rebounds');
+  assert.ok(rebounds);
+  assert.equal(rebounds.eligibleForTop, false);
+  assert.match(rebounds.extraReason, /Atividade abaixo do mínimo/);
   assert.ok(trends.some(item => item.market === 'assists'));
   assert.ok(trends.some(item => item.market === 'threes'));
 });
@@ -191,7 +194,7 @@ test('prefers the most demanding eligible OVER line within one point', () => {
   assert.ok(points.probability >= 60);
 });
 
-test('rejects OVER below recent mean and does not fall back when the qualifying line is below 60%', () => {
+test('keeps a below-60% OVER as EXTRA without lowering the recent-mean line floor', () => {
   const games = rows(
     Array(10).fill(20),
     Array(10).fill(5),
@@ -204,8 +207,10 @@ test('rejects OVER below recent mean and does not fall back when the qualifying 
   );
   const assistsOver = trends.find(item => item.market === 'assists' && item.direction === 'OVER');
 
-  assert.equal(assistsOver, undefined,
-    'OVER 1.5 is below the recent mean of 2.0, while OVER 2.5 fails 60%; no OVER should be selected');
+  assert.ok(assistsOver, 'the lower-probability candidate should remain available as an EXTRA');
+  assert.ok(assistsOver.suggestedLine >= assistsOver.recentMean);
+  assert.equal(assistsOver.eligibleForTop, false);
+  assert.match(assistsOver.extraReason, /Probabilidade estimada inferior a 60%/);
 });
 
 test('never generates UNDER opportunities', () => {
@@ -272,14 +277,15 @@ test('TOP 10 enforces two opportunities per team and three per game', () => {
   assert.equal(selected.filter(item => item.gameId === 'g1').length, 3);
 });
 
-test('TOP 10 excludes probability below 60 and ranks by score then confidence', () => {
+test('TOP 10 places qualified picks first and retains lower-probability candidates as Extras', () => {
   const selected = uniquePlayersTop([
-    candidate({ playerId: 'p-low', probability: 59, score: 99 }),
+    candidate({ playerId: 'p-low', playerName: 'Low Probability', teamName: 'Team C', gameId: 'game-3', probability: 59, score: 99 }),
     candidate({ playerId: 'p-score', probability: 80, confidencePercent: 70, score: 75 }),
     candidate({ playerId: 'p-confidence', probability: 78, confidencePercent: 90, score: 84 })
   ]);
 
-  assert.deepEqual(selected.map(item => item.playerId), ['p-confidence', 'p-score']);
+  assert.deepEqual(selected.map(item => item.playerId), ['p-confidence', 'p-score', 'p-low']);
+  assert.equal(selected[2].eligibleForTop, undefined);
 });
 
 test('TOP 10 excludes UNDER even when its score is higher', () => {
@@ -355,4 +361,59 @@ test('ESPN adapter preserves 3PA and leaves missing attempts absent', () => {
 
   assert.equal(result[0].threePointAttempts, 7);
   assert.equal(Object.hasOwn(result[1], 'threePointAttempts'), false);
+});
+
+
+test('TOP 10 fills positions after four qualified picks with clearly marked Extras', () => {
+  const qualified = Array.from({ length: 4 }, (_, i) => candidate({
+    playerId: `qualified-${i}`,
+    playerName: `Qualified ${i}`,
+    teamName: `Qualified Team ${i}`,
+    gameId: `qualified-game-${i}`,
+    score: 90 - i,
+    probability: 75,
+    eligibleForTop: true
+  }));
+  const extras = Array.from({ length: 6 }, (_, i) => candidate({
+    playerId: `extra-${i}`,
+    playerName: `Extra ${i}`,
+    teamName: `Extra Team ${i}`,
+    gameId: `extra-game-${i}`,
+    score: 80 - i,
+    probability: 55 + i,
+    eligibleForTop: false,
+    extraReason: 'Probabilidade estimada inferior a 60%'
+  }));
+
+  const selected = uniquePlayersTop([...extras, ...qualified], 10);
+
+  assert.equal(selected.length, 10);
+  assert.equal(selected.filter(item => item.eligibleForTop).length, 4);
+  assert.ok(selected.slice(0, 4).every(item => item.eligibleForTop));
+  assert.ok(selected.slice(4).every(item => item.eligibleForTop === false));
+  assert.ok(selected.slice(4).every(item => item.extraReason));
+});
+
+test('TOP 10 does not fill Extras with UNDER candidates', () => {
+  const over = candidate({
+    playerId: 'qualified-over',
+    eligibleForTop: true
+  });
+  const extraOver = candidate({
+    playerId: 'extra-over',
+    probability: 48,
+    eligibleForTop: false,
+    extraReason: 'Probabilidade estimada inferior a 60%'
+  });
+  const under = candidate({
+    playerId: 'under-extra',
+    direction: 'UNDER',
+    score: 99,
+    eligibleForTop: false
+  });
+
+  const selected = uniquePlayersTop([under, extraOver, over], 10);
+
+  assert.deepEqual(selected.map(item => item.playerId), ['qualified-over', 'extra-over']);
+  assert.ok(selected.every(item => item.direction === 'OVER'));
 });

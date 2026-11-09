@@ -110,16 +110,19 @@ function scan(){return `<section class="page-title"><p class="eyebrow">FASE 1 ·
  <button class="primary full" id="espn-search">Pesquisar jogador na ESPN</button>
  <div id="espn-results" class="scan-results" aria-live="polite"><p class="muted">Ainda não foi feita nenhuma pesquisa ESPN.</p></div>
  <div id="espn-profile" class="scan-results" aria-live="polite"></div>
- </section><section class="panel"><p class="eyebrow">CRITÉRIO DE SELEÇÃO</p><h2>TOP 7 + 3 EXTRAS</h2><p class="body-copy">As sete melhores oportunidades ficam na lista prioritária. As posições 8 a 10 são extras. Todas têm de cumprir os mesmos critérios de seleção.</p></section>`}
+ </section><section class="panel"><p class="eyebrow">CRITÉRIO DE SELEÇÃO</p><h2>TOP 7 + 3 EXTRAS</h2><p class="body-copy">As oportunidades que cumprem os critérios ficam na lista prioritária. Se existirem menos de sete, a lista continua com candidatos OVER reais, identificados como EXTRA e acompanhados do motivo. Extras não são picks prioritárias.</p></section>`}
 function opportunities(){
  const unique=uniquePlayersTop(scanOpportunities,10);
+ const qualifiedCount=Math.min(7,unique.filter(x=>x.eligibleForTop).length);
+ const firstExtraIndex=qualifiedCount;
  const fmt=(value:number|null|undefined)=>typeof value==='number'&&Number.isFinite(value)?value.toFixed(1):'—';
  const pct=(value:number|null|undefined)=>typeof value==='number'&&Number.isFinite(value)?`${Math.round(value)}%`:'—';
  const rows=unique.map((x,i)=>{
-  const sectionHeading = i === 0
-   ? '<div class="ranking-section-title"><h2>TOP 7 · PRIORITÁRIAS</h2><p>As melhores oportunidades que cumprem todos os critérios.</p></div>'
-   : i === 7
-    ? '<div class="ranking-section-title"><h2>EXTRAS · 8–10</h2><p>Oportunidades adicionais, igualmente sujeitas a todos os critérios.</p></div>'
+  const isExtra = i >= 7 || !x.eligibleForTop;
+  const sectionHeading = i === 0 && !isExtra
+   ? '<div class="ranking-section-title"><h2>TOP 7 · PRIORITÁRIAS</h2><p>Candidatos que cumprem os critérios completos do motor.</p></div>'
+   : i === firstExtraIndex && isExtra
+    ? `<div class="ranking-section-title extras-heading"><h2>EXTRAS · POSIÇÕES ${i+1}–10</h2><p>Candidatos OVER reais fora do grupo prioritário. Não devem ser interpretados como picks TOP.</p></div>`
     : '';
   const player=scanPlayers.find(p=>p.id===x.playerId);
   const playerStatus=player?.status||'';
@@ -131,18 +134,20 @@ function opportunities(){
    : '';
   const calibrationLabel=x.calibrationStatus==='CALIBRATED'?'CALIBRADA':'PROVISÓRIA';
   const recentResults=x.recentResults.map(value=>`<span>${fmt(value)}</span>`).join('');
+  const extraReason=x.extraReason || 'Candidato adicional após as sete posições prioritárias.';
 
-  return `${sectionHeading}<article class="opportunity-card">
+  return `${sectionHeading}<article class="opportunity-card ${isExtra?'extra-card':'priority-card'}">
    <div class="opportunity-main">
     <div class="player-photo ${photo?'':'no-photo'}">${photo}<span>${escapeHtml(initials)}</span></div>
     <div class="player-info">
-     <div class="player-rank">${i < 7 ? `TOP 7 · #${i+1}` : `EXTRA · #${i+1}`}</div>
+     <div class="player-rank ${isExtra?'extra-rank':''}">${isExtra ? `EXTRA · #${i+1}` : `TOP 7 · #${i+1}`}</div>
      <h3>${escapeHtml(x.playerName)}</h3>
      <p>${escapeHtml(x.teamName)}${player?.position?' · '+escapeHtml(player.position):''}</p>
      ${conditional?`<span class="medical-status conditional">${escapeHtml(playerStatus)} · CONFIRMAR DISPONIBILIDADE</span>`:''}
     </div>
     <div class="opportunity-score"><strong>${x.score}</strong><small>ÍNDICE COMBINADO</small></div>
    </div>
+   ${isExtra?`<div class="extra-disclaimer"><strong>EXTRA · NÃO PRIORITÁRIA</strong><span>${escapeHtml(extraReason)}</span></div>`:''}
    <div class="opportunity-pick">
     <div><small>MERCADO</small><strong>${escapeHtml(x.marketLabel)}</strong></div>
     <div><small>LINHA SUGERIDA</small><strong class="pick-line">${x.suggestedLine.toFixed(1)} <span>${escapeHtml(x.direction)}</span></strong></div>
@@ -168,10 +173,10 @@ function opportunities(){
   </article>`;
  }).join('');
 
- return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Top 10 <em>Oportunidades</em></h1><p class="sub">TOP 7 prioritárias + até 3 extras, sempre sujeitas aos mesmos critérios estatísticos e médicos.</p></section>
- <section class="ranking-summary"><div><span>TOP 7 · PRIORITÁRIAS</span><strong>${Math.min(unique.length,7)}<small> / 7</small></strong></div><div><span>EXTRAS</span><strong>${Math.max(0,unique.length-7)}<small> / 3</small></strong></div><div><span>HISTÓRICOS CARREGADOS</span><strong>${scanAnalysisCoverage.loaded}</strong></div><div><span>FALHAS DEFINITIVAS</span><strong>${scanAnalysisCoverage.failed}</strong></div></section>
+ return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Top 10 <em>Oportunidades</em></h1><p class="sub">Até sete oportunidades que cumprem os critérios completos, seguidas de até três candidatos OVER adicionais identificados como EXTRA quando necessário.</p></section>
+ <section class="ranking-summary"><div><span>TOP 7 · PRIORITÁRIAS</span><strong>${qualifiedCount}<small> / 7</small></strong></div><div><span>EXTRAS</span><strong>${Math.max(0,unique.length-qualifiedCount)}<small> / 3</small></strong></div><div><span>HISTÓRICOS CARREGADOS</span><strong>${scanAnalysisCoverage.loaded}</strong></div><div><span>FALHAS DEFINITIVAS</span><strong>${scanAnalysisCoverage.failed}</strong></div></section>
  <div class="notice ranking-notice"><b>${escapeHtml(scanAnalysisStatus)}</b><p>Históricos solicitados: ${scanAnalysisCoverage.requested} · Carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · Falhas definitivas: ${scanAnalysisCoverage.failed} · Recuperados após repetição: ${scanAnalysisCoverage.retried}</p></div>
- <section class="opportunity-list">${rows||'<div class="empty-state compact"><h2>Sem oportunidades elegíveis</h2><p>Não foram encontradas oportunidades com probabilidade estimada igual ou superior a 60%, atividade mínima e limites de concentração respeitados. A lista não será preenchida artificialmente.</p></div>'}</section>
+ <section class="opportunity-list">${rows||'<div class="empty-state compact"><h2>Sem candidatos disponíveis</h2><p>Não existem candidatos OVER com dados estatísticos válidos suficientes para construir a lista. O sistema não inventa jogadores, mercados, linhas ou resultados para completar dez posições.</p></div>'}</section>
  <p class="footnote">O índice combinado é uma métrica de ordenação, não uma probabilidade. PROVISÓRIA significa que ainda não existe histórico suficiente de previsões anteriores resolvidas para validar a calibração. Não representa EV nem substitui a comparação com odds de bookmaker.</p>`;
 }
 function validator(){return `
@@ -488,7 +493,7 @@ async function runScan(){
    }
   }
   scanOpportunities=candidates.sort((a,b)=>b.score-a.score);
-  scanAnalysisStatus=scanAnalysisCoverage.loaded===0?'Não foi possível carregar históricos ESPN válidos.':`Análise concluída: ${scanOpportunities.length} candidatos seleccionados após avaliar os históricos disponíveis.`;
+  scanAnalysisStatus=scanAnalysisCoverage.loaded===0?'Não foi possível carregar históricos ESPN válidos.':`Análise concluída: ${scanOpportunities.length} candidatos OVER com dados válidos identificados antes dos limites do Top 10.`;
   const failureSummary = [...failureReasons.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([reason,count])=>`<p>${count}x — ${escapeHtml(reason)}</p>`).join('');
   target.innerHTML=`<div class="notice"><b>${scanEvents.length} jogos encontrados nas próximas 24 horas</b><p>${escapeHtml(scanRosterStatus)}</p><p>${escapeHtml(scanInjuryText)}</p><p>${escapeHtml(scanAnalysisStatus)}</p><p>Históricos: ${scanAnalysisCoverage.loaded} carregados · ${scanAnalysisCoverage.noHistory} sem registos nesta época · ${scanAnalysisCoverage.failed} falhas definitivas · ${scanAnalysisCoverage.retried} recuperados após repetição.</p>${failureSummary ? `<hr><b>Principais causas das falhas</b>${failureSummary}` : ''}</div><button class="primary full" id="open-opportunities">Ver shortlist de oportunidades (${scanOpportunities.length})</button>`;
   document.querySelector('#open-opportunities')?.addEventListener('click',()=>{active='opportunities';render();});
