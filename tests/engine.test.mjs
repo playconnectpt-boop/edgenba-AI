@@ -82,7 +82,7 @@ test('missing market values are counted independently, never as zero', () => {
 test('accepts small samples and exposes probability, confidence and combined score', () => {
   const trends = rankPlayerTrends(
     { id: 'p-small', name: 'Small Sample' },
-    rows([24,23,22,21,20,18])
+    rows([30,30,30,30,0,30])
   );
   const points = trends.find(item => item.market === 'points');
 
@@ -94,12 +94,44 @@ test('accepts small samples and exposes probability, confidence and combined sco
   assert.equal(points.calibrationStatus, 'PROVISIONAL');
 });
 
+test('medical context reduces confidence without changing statistical probability', () => {
+  const player = { id: 'p-medical', name: 'Medical Player' };
+  const games = rows([30,30,30,30,0,30]);
+
+  const baseline = rankPlayerTrends(player, games)
+    .find(item => item.market === 'points');
+
+  assert.ok(baseline, 'baseline points candidate must exist');
+
+  for (const [status, penalty] of [
+    ['QUESTIONABLE', 18],
+    ['PROBABLE', 6],
+    ['RELATÓRIO INDISPONÍVEL', 20]
+  ]) {
+    const adjusted = rankPlayerTrends(player, games, {
+      contextConfidenceAdjustment: penalty
+    }).find(item => item.market === 'points');
+
+    assert.ok(adjusted, `${status} candidate must exist`);
+    assert.equal(adjusted.probability, baseline.probability);
+    assert.equal(
+      adjusted.confidencePercent,
+      baseline.confidencePercent - penalty,
+      `${status} must reduce confidence by ${penalty} points`
+    );
+    assert.equal(
+      adjusted.score,
+      Math.round((adjusted.probability + adjusted.confidencePercent) / 2)
+    );
+  }
+});
+
 test('market activity thresholds are proportional to available sample', () => {
   const games = rows(
-    [20,20,20,20,20,20],
-    [2,2,2,2,2,2],
-    [1,1,1,1,1,1],
-    [3,3,3,3,0,0]
+    [30,30,30,30,0,30],
+    [4,4,4,4,0,4],
+    [6,6,6,6,0,6],
+    [5,5,5,5,0,5]
   );
   // Supply real 3PA data: UNDER threes must not be inferred when attempts are unknown.
   games.forEach(game => { game.threePointAttempts = 5; });
@@ -113,10 +145,10 @@ test('market activity thresholds are proportional to available sample', () => {
 
 test('activity filter is market-specific', () => {
   const games = rows(
-    Array(10).fill(20),
+    [30,30,30,30,0,30,30,30,30,30],
     Array(10).fill(0),
-    Array(10).fill(3),
-    Array(10).fill(2)
+    [5,5,5,5,0,5,5,5,5,5],
+    [5,5,5,5,0,5,5,5,5,5]
   );
   const trends = rankPlayerTrends({ id: 'p-filter', name: 'Filter' }, games);
 
@@ -139,6 +171,54 @@ test('suggested lines use half points and avoid trivial UNDER 0.5', () => {
     assert.equal(item.suggestedLine % 1, 0.5);
     if (item.direction === 'UNDER') assert.ok(item.suggestedLine > 0.5);
   }
+});
+
+test('prefers the most demanding eligible OVER line within one point', () => {
+  const games = rows([
+    40,40,40,0,29,
+    ...Array(10).fill(40),
+    ...Array(5).fill(10)
+  ]);
+  const trends = rankPlayerTrends(
+    { id: 'p-demanding-over', name: 'Demanding Over' },
+    games
+  );
+  const points = trends.find(item => item.market === 'points' && item.direction === 'OVER');
+
+  assert.ok(points, 'should retain an eligible OVER opportunity');
+  assert.ok(points.suggestedLine >= points.recentMean,
+    'OVER line must not be below the recent five-game mean');
+  assert.ok(points.probability >= 60);
+});
+
+test('rejects OVER below recent mean and does not fall back when the qualifying line is below 60%', () => {
+  const games = rows(
+    Array(10).fill(20),
+    Array(10).fill(5),
+    [...Array(5).fill(2), ...Array(5).fill(1)],
+    Array(10).fill(2)
+  );
+  const trends = rankPlayerTrends(
+    { id: 'p-recent-mean-floor', name: 'Recent Mean Floor' },
+    games
+  );
+  const assistsOver = trends.find(item => item.market === 'assists' && item.direction === 'OVER');
+
+  assert.equal(assistsOver, undefined,
+    'OVER 1.5 is below the recent mean of 2.0, while OVER 2.5 fails 60%; no OVER should be selected');
+});
+
+test('never generates UNDER opportunities', () => {
+  const games = rows([
+    ...Array(10).fill(10),
+    ...Array(10).fill(30)
+  ]);
+  const trends = rankPlayerTrends(
+    { id: 'p-no-under', name: 'No Under' },
+    games
+  );
+
+  assert.ok(trends.every(item => item.direction === 'OVER'));
 });
 
 test('calibration remains provisional without sufficient history', () => {
@@ -202,13 +282,44 @@ test('TOP 10 excludes probability below 60 and ranks by score then confidence', 
   assert.deepEqual(selected.map(item => item.playerId), ['p-confidence', 'p-score']);
 });
 
-test('a stronger UNDER ranks above a weaker OVER', () => {
+test('TOP 10 excludes UNDER even when its score is higher', () => {
   const selected = uniquePlayersTop([
-    candidate({ playerId: 'p-under', direction: 'UNDER', score: 84 }),
-    candidate({ playerId: 'p-over', direction: 'OVER', score: 80 })
+    candidate({ playerId: 'p-under', direction: 'UNDER', score: 99 }),
+    candidate({ playerId: 'p-over', direction: 'OVER', score: 70 })
   ]);
 
-  assert.equal(selected[0].playerId, 'p-under');
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].playerId, 'p-over');
+  assert.ok(selected.every(item => item.direction === 'OVER'));
+});
+
+test('TOP 10 never fills missing places with UNDER opportunities', () => {
+  const overs = Array.from({ length: 7 }, (_, i) =>
+    candidate({
+      playerId: `over-${i}`,
+      playerName: `Over ${i}`,
+      teamName: `Over Team ${i}`,
+      gameId: `over-game-${i}`,
+      direction: 'OVER',
+      score: 70 - i
+    })
+  );
+
+  const unders = Array.from({ length: 10 }, (_, i) =>
+    candidate({
+      playerId: `under-${i}`,
+      playerName: `Under ${i}`,
+      teamName: `Under Team ${i}`,
+      gameId: `under-game-${i}`,
+      direction: 'UNDER',
+      score: 99 - i
+    })
+  );
+
+  const selected = uniquePlayersTop([...unders, ...overs]);
+
+  assert.equal(selected.length, 7);
+  assert.ok(selected.every(item => item.direction === 'OVER'));
 });
 
 test('ESPN adapter validates payload and derives PRA', () => {

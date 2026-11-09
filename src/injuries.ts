@@ -68,10 +68,12 @@ export function parseEspnInjuryReport(payload: unknown): EspnInjuryReport {
 
       if (athleteId && status) {
         const label = /suspend/i.test(status) ? 'SUSPENSO'
-  : /question|day.to.day/i.test(status) ? 'QUESTIONÁVEL'
   : /doubt/i.test(status) ? 'DUVIDOSO'
+  : /question|day.to.day/i.test(status) ? 'QUESTIONÁVEL'
+  : /probable/i.test(status) ? 'PROBABLE'
+  : /available/i.test(status) ? 'AVAILABLE'
   : /inactive/i.test(status) ? 'INATIVO'
-  : /out|injur/i.test(status) ? 'LESIONADO'
+  : /\b(out|injur)/i.test(status) ? 'LESIONADO'
   : '';
 
         if (label) statuses.set(athleteId, label);
@@ -83,4 +85,33 @@ export function parseEspnInjuryReport(payload: unknown): EspnInjuryReport {
 
   walk(root.injuries);
   return { valid: true, statuses };
+}
+
+
+export type MedicalDecision = {
+  excluded: boolean;
+  confidenceAdjustment: number;
+  warning: boolean;
+};
+
+export function getMedicalDecision(status: string): MedicalDecision {
+  const normalized = status.trim().toUpperCase();
+
+  if (/^(OUT|LESIONADO|INATIVO|SUSPENSO|DUVIDOSO|DOUBTFUL)$/.test(normalized)) {
+    return { excluded: true, confidenceAdjustment: 0, warning: false };
+  }
+
+  if (normalized === 'QUESTIONÁVEL' || normalized === 'QUESTIONABLE') {
+    return { excluded: false, confidenceAdjustment: 18, warning: true };
+  }
+
+  if (normalized === 'PROBABLE') {
+    return { excluded: false, confidenceAdjustment: 6, warning: false };
+  }
+
+  if (normalized === 'RELATÓRIO INDISPONÍVEL') {
+    return { excluded: false, confidenceAdjustment: 20, warning: false };
+  }
+
+  return { excluded: false, confidenceAdjustment: 0, warning: false };
 }

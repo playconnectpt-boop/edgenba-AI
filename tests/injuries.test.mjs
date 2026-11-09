@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseEspnInjuryReport } from '../src/injuries.ts';
+import { parseEspnInjuryReport, getMedicalDecision } from '../src/injuries.ts';
 
 const injury = (athleteId, status, injuryId = 537995) => ({
   id: injuryId,
@@ -31,7 +31,9 @@ test('maps ESPN injury statuses to the expected labels', () => {
         injury('1003', 'Doubtful'),
         injury('1004', 'Probable'),
         injury('1005', 'Suspended'),
-        injury('1006', 'Inactive')
+        injury('1006', 'Inactive'),
+        injury('1007', 'Questionable'),
+        injury('1008', 'Available')
       ]}
     ]
   });
@@ -40,8 +42,11 @@ test('maps ESPN injury statuses to the expected labels', () => {
     ['1001', 'LESIONADO'],
     ['1002', 'QUESTIONÁVEL'],
     ['1003', 'DUVIDOSO'],
+    ['1004', 'PROBABLE'],
     ['1005', 'SUSPENSO'],
-    ['1006', 'INATIVO']
+    ['1006', 'INATIVO'],
+    ['1007', 'QUESTIONÁVEL'],
+    ['1008', 'AVAILABLE']
   ]);
 });
 
@@ -83,4 +88,43 @@ test('does not guess an athlete ID when links contain conflicting IDs', () => {
 
   assert.equal(result.valid, true);
   assert.equal(result.statuses.size, 0);
+});
+
+
+test('medical decisions exclude unavailable players and penalize uncertainty', () => {
+  for (const status of ['OUT', 'LESIONADO', 'INATIVO', 'SUSPENSO', 'DUVIDOSO', 'DOUBTFUL']) {
+    assert.deepEqual(getMedicalDecision(status), {
+      excluded: true,
+      confidenceAdjustment: 0,
+      warning: false
+    }, status);
+  }
+
+  assert.deepEqual(getMedicalDecision('QUESTIONÁVEL'), {
+    excluded: false, confidenceAdjustment: 18, warning: true
+  });
+
+  assert.deepEqual(getMedicalDecision('QUESTIONABLE'), {
+    excluded: false, confidenceAdjustment: 18, warning: true
+  });
+
+  assert.deepEqual(getMedicalDecision('PROBABLE'), {
+    excluded: false, confidenceAdjustment: 6, warning: false
+  });
+
+  assert.deepEqual(getMedicalDecision('RELATÓRIO INDISPONÍVEL'), {
+    excluded: false, confidenceAdjustment: 20, warning: false
+  });
+
+  assert.deepEqual(getMedicalDecision('ID ESPN EM FALTA'), {
+    excluded: false, confidenceAdjustment: 0, warning: false
+  });
+
+  assert.deepEqual(getMedicalDecision('AVAILABLE'), {
+    excluded: false, confidenceAdjustment: 0, warning: false
+  });
+
+  assert.deepEqual(getMedicalDecision('SEM REGISTO'), {
+    excluded: false, confidenceAdjustment: 0, warning: false
+  });
 });

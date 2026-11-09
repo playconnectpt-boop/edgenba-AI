@@ -1,6 +1,6 @@
 // @ts-ignore -- Vite processa este CSS em runtime; não é um módulo TypeScript.
 import './style.css';
-import { parseEspnInjuryReport } from './injuries';
+import { parseEspnInjuryReport, getMedicalDecision } from './injuries';
 import { adaptEspnGamelog, buildPlayerProfile, rankPlayerTrends, uniquePlayersTop, type StatLine, type Market } from './engine';
 
 type Tab = 'dashboard'|'scan'|'opportunities'|'validator'|'history'|'settings';
@@ -110,15 +110,20 @@ function scan(){return `<section class="page-title"><p class="eyebrow">FASE 1 ·
  <button class="primary full" id="espn-search">Pesquisar jogador na ESPN</button>
  <div id="espn-results" class="scan-results" aria-live="polite"><p class="muted">Ainda não foi feita nenhuma pesquisa ESPN.</p></div>
  <div id="espn-profile" class="scan-results" aria-live="polite"></div>
- </section><section class="panel"><p class="eyebrow">CRITÉRIO DE SELEÇÃO</p><h2>Até 10 oportunidades</h2><p class="body-copy">A lista é ordenada por qualidade estatística, estabilidade da projeção, contexto e incerteza. Se só existirem 4 oportunidades que cumpram os critérios, serão apresentadas 4.</p></section>`}
+ </section><section class="panel"><p class="eyebrow">CRITÉRIO DE SELEÇÃO</p><h2>TOP 7 + 3 EXTRAS</h2><p class="body-copy">As sete melhores oportunidades ficam na lista prioritária. As posições 8 a 10 são extras. Todas têm de cumprir os mesmos critérios de seleção.</p></section>`}
 function opportunities(){
  const unique=uniquePlayersTop(scanOpportunities,10);
  const fmt=(value:number|null|undefined)=>typeof value==='number'&&Number.isFinite(value)?value.toFixed(1):'—';
  const pct=(value:number|null|undefined)=>typeof value==='number'&&Number.isFinite(value)?`${Math.round(value)}%`:'—';
  const rows=unique.map((x,i)=>{
+  const sectionHeading = i === 0
+   ? '<div class="ranking-section-title"><h2>TOP 7 · PRIORITÁRIAS</h2><p>As melhores oportunidades que cumprem todos os critérios.</p></div>'
+   : i === 7
+    ? '<div class="ranking-section-title"><h2>EXTRAS · 8–10</h2><p>Oportunidades adicionais, igualmente sujeitas a todos os critérios.</p></div>'
+    : '';
   const player=scanPlayers.find(p=>p.id===x.playerId);
   const playerStatus=player?.status||'';
-  const conditional=/QUESTIONABLE|DOUBTFUL|QUESTIONÁVEL|DUVIDOSO/i.test(playerStatus);
+  const conditional = getMedicalDecision(playerStatus).warning;
   const photoId=String(player?.espn_id||'').replace(/\D/g,'');
   const initials=x.playerName.split(/\s+/).filter(Boolean).slice(0,2).map(n=>n[0]).join('').toUpperCase();
   const photo=photoId
@@ -127,11 +132,11 @@ function opportunities(){
   const calibrationLabel=x.calibrationStatus==='CALIBRATED'?'CALIBRADA':'PROVISÓRIA';
   const recentResults=x.recentResults.map(value=>`<span>${fmt(value)}</span>`).join('');
 
-  return `<article class="opportunity-card">
+  return `${sectionHeading}<article class="opportunity-card">
    <div class="opportunity-main">
     <div class="player-photo ${photo?'':'no-photo'}">${photo}<span>${escapeHtml(initials)}</span></div>
     <div class="player-info">
-     <div class="player-rank">TOP 10 · #${i+1}</div>
+     <div class="player-rank">${i < 7 ? `TOP 7 · #${i+1}` : `EXTRA · #${i+1}`}</div>
      <h3>${escapeHtml(x.playerName)}</h3>
      <p>${escapeHtml(x.teamName)}${player?.position?' · '+escapeHtml(player.position):''}</p>
      ${conditional?`<span class="medical-status conditional">${escapeHtml(playerStatus)} · CONFIRMAR DISPONIBILIDADE</span>`:''}
@@ -163,8 +168,8 @@ function opportunities(){
   </article>`;
  }).join('');
 
- return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Top 10 <em>Oportunidades</em></h1><p class="sub">Ordenação por índice combinado: 50% probabilidade estimada + 50% confiança. A probabilidade permanece provisória até existir calibração histórica suficiente.</p></section>
- <section class="ranking-summary"><div><span>SELEÇÕES APROVADAS</span><strong>${unique.length}<small> / 10</small></strong></div><div><span>HISTÓRICOS CARREGADOS</span><strong>${scanAnalysisCoverage.loaded}</strong></div><div><span>FALHAS DEFINITIVAS</span><strong>${scanAnalysisCoverage.failed}</strong></div></section>
+ return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Top 10 <em>Oportunidades</em></h1><p class="sub">TOP 7 prioritárias + até 3 extras, sempre sujeitas aos mesmos critérios estatísticos e médicos.</p></section>
+ <section class="ranking-summary"><div><span>TOP 7 · PRIORITÁRIAS</span><strong>${Math.min(unique.length,7)}<small> / 7</small></strong></div><div><span>EXTRAS</span><strong>${Math.max(0,unique.length-7)}<small> / 3</small></strong></div><div><span>HISTÓRICOS CARREGADOS</span><strong>${scanAnalysisCoverage.loaded}</strong></div><div><span>FALHAS DEFINITIVAS</span><strong>${scanAnalysisCoverage.failed}</strong></div></section>
  <div class="notice ranking-notice"><b>${escapeHtml(scanAnalysisStatus)}</b><p>Históricos solicitados: ${scanAnalysisCoverage.requested} · Carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · Falhas definitivas: ${scanAnalysisCoverage.failed} · Recuperados após repetição: ${scanAnalysisCoverage.retried}</p></div>
  <section class="opportunity-list">${rows||'<div class="empty-state compact"><h2>Sem oportunidades elegíveis</h2><p>Não foram encontradas oportunidades com probabilidade estimada igual ou superior a 60%, atividade mínima e limites de concentração respeitados. A lista não será preenchida artificialmente.</p></div>'}</section>
  <p class="footnote">O índice combinado é uma métrica de ordenação, não uma probabilidade. PROVISÓRIA significa que ainda não existe histórico suficiente de previsões anteriores resolvidas para validar a calibração. Não representa EV nem substitui a comparação com odds de bookmaker.</p>`;
@@ -330,9 +335,11 @@ async function runScan(){
    const roster=Array.isArray(rosterPayload.players)?rosterPayload.players:[];
    scanPlayers=roster.filter(player=>player.rotation_eligible===true).map(player=>({
     ...player,
-    status:injuryReportAvailable&&player.espn_id
-     ? injuryStatuses.get(player.espn_id)||''
-     : ''
+    status: !injuryReportAvailable
+     ? 'RELATÓRIO INDISPONÍVEL'
+     : !player.espn_id
+       ? 'ID ESPN EM FALTA'
+       : injuryStatuses.get(player.espn_id) || 'SEM REGISTO'
    }));
    scanRosterStatus=`${scanPlayers.length} jogadores de rotação identificados (${rosterPayload.meta?.rotation_count??scanPlayers.length} elegíveis) em ${rosterPayload.meta?.teams_found??0}/${rosterPayload.meta?.teams_requested??teamNames.length} equipas`;
    if(rosterPayload.missing_teams?.length)scanRosterStatus+=`. Equipas sem correspondência: ${rosterPayload.missing_teams.join(', ')}`;
@@ -461,8 +468,13 @@ async function runScan(){
      const rows=adaptEspnGamelog({data:result.data});
      if(!rows.length){scanAnalysisCoverage.failed++;addFailureReason('Histórico recebido, mas sem linhas válidas após adaptação');continue;}
      scanAnalysisCoverage.loaded++;
-     const status=player.status||'';
-     if(!/LESIONADO|SUSPENSO|INATIVO|OUT/i.test(status)) candidates.push(...rankPlayerTrends(player,rows));
+     const medicalDecision = getMedicalDecision(player.status || '');
+
+     if (!medicalDecision.excluded) {
+      candidates.push(...rankPlayerTrends(player, rows, {
+       contextConfidenceAdjustment: medicalDecision.confidenceAdjustment
+      }));
+     }
     }catch(error){
      scanAnalysisCoverage.failed++;
      addFailureReason(`Erro ao interpretar histórico: ${String(error)}`);

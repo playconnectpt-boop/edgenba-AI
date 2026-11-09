@@ -180,7 +180,7 @@ export type TrendCandidate = {
   confidence: 'LIMITADA' | 'BAIXA' | 'MODERADA' | 'ALTA';
 };
 
-type Direction = 'OVER' | 'UNDER';
+type Direction = 'OVER';
 type Player = { id: string; name: string; team_name?: string; game_id?: string };
 type RankingOptions = {
   calibration?: CalibrationRecord[];
@@ -252,32 +252,42 @@ export function calibrateProbability(
  * Game limits require a gameId; an unknown game is not invented.
  */
 export function uniquePlayersTop(candidates: TrendCandidate[], limit = 10): TrendCandidate[] {
+  const maxResults = Math.max(0, limit);
+  if (maxResults === 0) return [];
+
   const result: TrendCandidate[] = [];
   const players = new Set<string>();
   const teams = new Map<string, number>();
   const games = new Map<string, number>();
+
   const ordered = [...candidates].sort((a, b) =>
     b.score - a.score ||
     b.confidencePercent - a.confidencePercent ||
     a.playerName.localeCompare(b.playerName)
   );
+
   for (const candidate of ordered) {
+    if (candidate.direction !== 'OVER') continue;
     if (!Number.isFinite(candidate.probability) || candidate.probability < 60) continue;
+
     const player = candidate.playerId || candidate.playerName.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
     const team = candidate.teamName.trim().toLowerCase();
     const game = candidate.gameId?.trim();
+
     if (players.has(player)) continue;
     if ((teams.get(team) || 0) >= 2) continue;
     if (game && (games.get(game) || 0) >= 3) continue;
+
     result.push(candidate);
     players.add(player);
     teams.set(team, (teams.get(team) || 0) + 1);
     if (game) games.set(game, (games.get(game) || 0) + 1);
-    if (result.length >= Math.max(0, limit)) break;
+
+    if (result.length >= maxResults) break;
   }
+
   return result;
 }
-
 /**
  * Generates provisional model-based opportunities from ESPN game logs.
  * Probabilities are NOT validated win probabilities until sufficient historical
@@ -322,38 +332,20 @@ export function rankPlayerTrends(
     const recentWeight = clamp(0.55 - 0.25 * divergence, 0.25, 0.55);
     const target = recentWeight * recentMean + (1 - recentWeight) * baseline;
 
-    // Exclude low-value lines before probability/ranking calculations.
-    // OVER 0.5 and UNDER 0.5/1.5 are not eligible for the TOP 10.
+    // OVER only: evaluate the most demanding available line at or above
+    // the recent five-game mean. Never fall back to a lower line.
     const MIN_OVER_LINE = 1.5;
-    const MIN_UNDER_LINE = 2.5;
-    const centralLine = Math.floor(target) + 0.5;
-    const lineOptions = [...new Set([
-      centralLine - 1, centralLine, centralLine + 1
-    ])].filter(line => line >= MIN_OVER_LINE);
+    const firstLine = Math.ceil(target - 1 - 0.5) + 0.5;
+    const lineOptions: number[] = [];
+    for (let line = firstLine; line <= target + 1 + 1e-9; line += 1) {
+      if (line >= MIN_OVER_LINE && line >= recentMean) lineOptions.push(line);
+    }
+    if (!lineOptions.length) continue;
+
+    const line = lineOptions[lineOptions.length - 1];
+    const direction: Direction = 'OVER';
     const candidates: TrendCandidate[] = [];
-
-    // UNDER on three-pointers requires actual attempt data and meaningful volume.
-    // Missing 3PA is unknown, never interpreted as zero.
-    const recent10Rows = last10.slice(0, 10);
-    const knownThreePointAttempts = recent10Rows
-      .map(row => row.threePointAttempts)
-      .filter((value): value is number =>
-        typeof value === 'number' && Number.isFinite(value) && value >= 0
-      );
-    const threePointAttemptCoverage = knownThreePointAttempts.length / Math.max(1, recent10Rows.length);
-    const averageThreePointAttempts = knownThreePointAttempts.length
-      ? average(knownThreePointAttempts)
-      : null;
-    const underThreesEligible =
-      threePointAttemptCoverage >= 0.8 &&
-      averageThreePointAttempts !== null &&
-      averageThreePointAttempts >= 4;
-
-    for (const line of lineOptions) {
-      for (const direction of ['OVER', 'UNDER'] as Direction[]) {
-        if (direction === 'UNDER' && line < MIN_UNDER_LINE) continue;
-        if (market === 'threes' && direction === 'UNDER' && !underThreesEligible) continue;
-        const recentHits = hits(recentValues, line, direction);
+    const recentHits = hits(recentValues, line, direction);
         const tenHits = hits(tenValues, line, direction);
         const seasonHits = hits(seasonValues, line, direction);
         const recentRate = recentHits / recentValues.length;
@@ -369,9 +361,6 @@ export function rankPlayerTrends(
         const calibrated = calibrateProbability(rawProbability, market, options.calibration);
         if (calibrated.probability < 60) continue;
 
-        // Penalize forecast-vs-line disagreement and unstable minutes, not merely raw variance.
-        const lineMargin = direction === 'OVER' ? target - line : line - target;
-        if (lineMargin <= 0) continue;
         const minutesRatio = minutesRecent !== null && minutesSeason !== null
           ? minutesRecent / Math.max(1, minutesSeason) : null;
         const minutesDrop = minutesRatio === null ? 8 : clamp((0.95 - minutesRatio) * 50, 0, 20);
@@ -418,9 +407,6 @@ export function rankPlayerTrends(
             `Estimativa ${calibrated.status === 'CALIBRATED' ? 'calibrada' : 'provisória'}: ` +
             `${calibrated.probability}%; confiança: ${confidencePercent}%.`
         });
-      }
-    }
-    // Only the strongest line/direction per market, to avoid trivial variants.
     candidates.sort((a, b) =>
       b.score - a.score ||
       b.confidencePercent - a.confidencePercent ||
