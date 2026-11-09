@@ -492,6 +492,15 @@ const worker: WorkerHandler = {
         await env.DB.prepare(`CREATE TABLE IF NOT EXISTS player_source_ids (player_id TEXT NOT NULL, source TEXT NOT NULL, source_player_id TEXT NOT NULL, season INTEGER NOT NULL, verified INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (player_id, source, season))`).run();
         const dbResult = await env.DB.prepare('SELECT p.player_id, p.name, ps.team_name FROM players p LEFT JOIN player_seasons ps ON ps.player_id=p.player_id AND ps.season=?').bind(season).all();
         const existing = (dbResult.results || []) as any[];
+        // Preservar o ID interno já associado a cada ID ESPN nesta época.
+        // O mesmo atleta pode surgir em mais do que um roster; nunca o remapear
+        // para outro player_id apenas por causa de uma correspondência de nome/equipa.
+        const sourceIdsResult = await env.DB.prepare(
+          "SELECT source_player_id, player_id FROM player_source_ids WHERE source='ESPN' AND season=?"
+        ).bind(season).all();
+        const existingByEspnId = new Map<string, string>(
+          ((sourceIdsResult.results || []) as any[]).map(row => [String(row.source_player_id), String(row.player_id)])
+        );
         const existingByNameTeam = new Map<string, any[]>();
         for (const player of existing) {
           const key = `${normalize(String(player.name || ''))}|${normalize(String(player.team_name || ''))}`;
@@ -516,12 +525,24 @@ const worker: WorkerHandler = {
               const key = `${normalize(name)}|${normalize(teamName)}`;
               const candidates = existingByNameTeam.get(key) || [];
               const legacy = candidates.length === 1 ? candidates[0] : null;
-              const internalId = legacy ? String(legacy.player_id) : espnId;
+              const mappedInternalId = existingByEspnId.get(espnId);
+              const internalId = mappedInternalId || (legacy ? String(legacy.player_id) : espnId);
               const position = athlete.position?.abbreviation || athlete.position?.name || null;
               const teamEspnId = String(roster.team?.id || teamId);
               inserts.push(env.DB.prepare(`INSERT INTO players (player_id,name,team_id,position,updated_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(player_id) DO UPDATE SET name=excluded.name,team_id=excluded.team_id,position=excluded.position,updated_at=CURRENT_TIMESTAMP`).bind(internalId, name, teamEspnId, position));
               inserts.push(env.DB.prepare(`INSERT INTO player_seasons (player_id,season,team_id,team_name) VALUES (?,?,?,?) ON CONFLICT(player_id,season) DO UPDATE SET team_id=excluded.team_id,team_name=excluded.team_name`).bind(internalId, season, teamEspnId, teamName));
-              mappings.push(env.DB.prepare(`INSERT INTO player_source_ids (player_id,source,source_player_id,season,verified,updated_at) VALUES (?,'ESPN',?,?,1,CURRENT_TIMESTAMP) ON CONFLICT(player_id,source,season) DO UPDATE SET source_player_id=excluded.source_player_id,verified=1,updated_at=CURRENT_TIMESTAMP`).bind(internalId, espnId, season));
+              // Nunca remapear uma chave única para outro jogador. Se qualquer
+              // restrição UNIQUE já existir, ignorar a inserção; depois validar
+              // apenas o mapeamento que corresponde exatamente ao ID ESPN.
+              mappings.push(env.DB.prepare(`INSERT INTO player_source_ids
+                (player_id,source,source_player_id,season,verified,updated_at)
+                VALUES (?,'ESPN',?,?,1,CURRENT_TIMESTAMP)
+                ON CONFLICT DO NOTHING
+              `).bind(internalId, espnId, season));
+              mappings.push(env.DB.prepare(`UPDATE player_source_ids
+                SET verified=1,updated_at=CURRENT_TIMESTAMP
+                WHERE source='ESPN' AND source_player_id=? AND season=?
+              `).bind(espnId, season));
               if (legacy) mappedHistorical++;
               savedPlayers++;
             }

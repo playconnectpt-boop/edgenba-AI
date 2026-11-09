@@ -113,59 +113,61 @@ function scan(){return `<section class="page-title"><p class="eyebrow">FASE 1 ·
  </section><section class="panel"><p class="eyebrow">CRITÉRIO DE SELEÇÃO</p><h2>Até 10 oportunidades</h2><p class="body-copy">A lista é ordenada por qualidade estatística, estabilidade da projeção, contexto e incerteza. Se só existirem 4 oportunidades que cumpram os critérios, serão apresentadas 4.</p></section>`}
 function opportunities(){
  const unique=uniquePlayersTop(scanOpportunities,10);
+ const fmt=(value:number|null|undefined)=>typeof value==='number'&&Number.isFinite(value)?value.toFixed(1):'—';
+ const pct=(value:number|null|undefined)=>typeof value==='number'&&Number.isFinite(value)?`${Math.round(value)}%`:'—';
  const rows=unique.map((x,i)=>{
   const player=scanPlayers.find(p=>p.id===x.playerId);
   const playerStatus=player?.status||'';
-  const conditional=/QUESTIONÁVEL|DUVIDOSO/.test(playerStatus);
+  const conditional=/QUESTIONABLE|DOUBTFUL|QUESTIONÁVEL|DUVIDOSO/i.test(playerStatus);
   const photoId=String(player?.espn_id||'').replace(/\D/g,'');
   const initials=x.playerName.split(/\s+/).filter(Boolean).slice(0,2).map(n=>n[0]).join('').toUpperCase();
   const photo=photoId
    ? `<img src="https://a.espncdn.com/i/headshots/nba/players/full/${photoId}.png" alt="${escapeHtml(x.playerName)}" loading="lazy" onerror="this.parentElement.classList.add('no-photo');this.remove()">`
    : '';
-  const hitRate=x.lineHitRate===null?'N/D':(x.lineHitRate*100).toFixed(0)+'%';
-  const previousHitRate=x.previousLineHitRate===null?'N/D':(x.previousLineHitRate*100).toFixed(0)+'%';
+  const calibrationLabel=x.calibrationStatus==='CALIBRATED'?'CALIBRADA':'PROVISÓRIA';
+  const recentResults=x.recentResults.map(value=>`<span>${fmt(value)}</span>`).join('');
 
   return `<article class="opportunity-card">
    <div class="opportunity-main">
     <div class="player-photo ${photo?'':'no-photo'}">${photo}<span>${escapeHtml(initials)}</span></div>
     <div class="player-info">
-     <div class="player-rank">OPORTUNIDADE #${i+1}</div>
+     <div class="player-rank">TOP 10 · #${i+1}</div>
      <h3>${escapeHtml(x.playerName)}</h3>
      <p>${escapeHtml(x.teamName)}${player?.position?' · '+escapeHtml(player.position):''}</p>
-     ${playerStatus?`<span class="medical-status ${conditional?'conditional':''}">${escapeHtml(playerStatus)}${conditional?' · CENÁRIO CONDICIONAL':''}</span>`:''}
+     ${conditional?`<span class="medical-status conditional">${escapeHtml(playerStatus)} · CONFIRMAR DISPONIBILIDADE</span>`:''}
     </div>
-    <div class="opportunity-score"><strong>${x.score}</strong><small>ÍNDICE</small></div>
+    <div class="opportunity-score"><strong>${x.score}</strong><small>ÍNDICE COMBINADO</small></div>
    </div>
    <div class="opportunity-pick">
     <div><small>MERCADO</small><strong>${escapeHtml(x.marketLabel)}</strong></div>
     <div><small>LINHA SUGERIDA</small><strong class="pick-line">${x.suggestedLine.toFixed(1)} <span>${escapeHtml(x.direction)}</span></strong></div>
+    <div><small>PROBABILIDADE · ${calibrationLabel}</small><strong>${pct(x.probability)}</strong></div>
+    <div><small>CONFIANÇA</small><strong>${pct(x.confidencePercent)}</strong></div>
     <div><small>QUALIDADE</small><strong>${escapeHtml(x.quality)}</strong></div>
-    <div><small>CONFIANÇA</small><strong>${escapeHtml(x.confidence)}</strong></div>
    </div>
-   <div class="opportunity-explanation">${escapeHtml(x.explanation)}</div>
    <div class="opportunity-stats">
-    <div class="stat-box"><small>MÉDIA · ÚLTIMOS 5</small><strong>${x.recentMean.toFixed(1)}</strong><span>${x.recentSample} registos</span></div>
-    <div class="stat-box"><small>MÉDIA · ÚLTIMOS 10</small><strong>${x.recent10Mean.toFixed(1)}</strong><span>jogos recentes</span></div>
-    <div class="stat-box"><small>5 ANTERIORES</small><strong>${x.previousMean.toFixed(1)}</strong><span>${x.previousSample} registos</span></div>
-    <div class="stat-box"><small>MÉDIA DA ÉPOCA</small><strong>${x.seasonMean.toFixed(1)}</strong><span>${x.seasonSample} registos</span></div>
+    <div class="stat-box"><small>MÉDIA · ÚLTIMOS 5</small><strong>${fmt(x.recentMean)}</strong><span>${x.recentSample} jogos</span></div>
+    <div class="stat-box"><small>MÉDIA · ÚLTIMOS 10</small><strong>${fmt(x.recent10Mean)}</strong><span>jogos recentes</span></div>
+    <div class="stat-box"><small>MÉDIA · ÉPOCA</small><strong>${fmt(x.seasonMean)}</strong><span>${x.seasonSample} jogos</span></div>
+    <div class="stat-box"><small>MEDIANA · ÉPOCA</small><strong>${fmt(x.seasonMedian)}</strong><span>distribuição da época</span></div>
    </div>
    <div class="opportunity-detail">
-    <div class="detail-heading">RESULTADOS RECENTES</div>
-    <div class="recent-results">${x.recentResults.map(value=>`<span>${value.toFixed(1)}</span>`).join('')}</div>
+    <div class="detail-heading">RESULTADOS DOS ÚLTIMOS 5 JOGOS</div>
+    <div class="recent-results">${recentResults||'<span>Sem dados</span>'}</div>
     <div class="detail-metrics">
-     <span>Tendência: <b>${x.trendHits}/${x.recentSample} (${(x.trendHitRate*100).toFixed(0)}%)</b></span>
-     <span>Mesma linha: <b>${x.lineHits}/${x.lineSample} (${hitRate})</b>${x.linePushes?' · '+x.linePushes+' pushes':''}</span>
-     <span>5 anteriores na mesma linha: <b>${x.previousLineHits}/${x.previousLineSample} (${previousHitRate})</b>${x.previousLinePushes?' · '+x.previousLinePushes+' pushes':''}</span>
+     <span>Acertos na linha · últimos 5: <b>${x.lineHits}/${x.lineSample} (${x.lineHitRate===null?'—':pct(x.lineHitRate*100)})</b></span>
+     <span>Minutos recentes: <b>${fmt(x.minutesRecent)}</b></span>
+     <span>Minutos na época: <b>${fmt(x.minutesSeason)}</b></span>
     </div>
    </div>
   </article>`;
  }).join('');
 
- return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Top 10 <em>Oportunidades</em></h1><p class="sub">Jogadores com alterações recentes sustentadas nos dados. O ranking é estatístico e não representa probabilidade de acerto ou valor confirmado.</p></section>
+ return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Top 10 <em>Oportunidades</em></h1><p class="sub">Ordenação por índice combinado: 50% probabilidade estimada + 50% confiança. A probabilidade permanece provisória até existir calibração histórica suficiente.</p></section>
  <section class="ranking-summary"><div><span>SELEÇÕES APROVADAS</span><strong>${unique.length}<small> / 10</small></strong></div><div><span>HISTÓRICOS CARREGADOS</span><strong>${scanAnalysisCoverage.loaded}</strong></div><div><span>FALHAS DEFINITIVAS</span><strong>${scanAnalysisCoverage.failed}</strong></div></section>
  <div class="notice ranking-notice"><b>${escapeHtml(scanAnalysisStatus)}</b><p>Históricos solicitados: ${scanAnalysisCoverage.requested} · Carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · Falhas definitivas: ${scanAnalysisCoverage.failed} · Recuperados após repetição: ${scanAnalysisCoverage.retried}</p></div>
- <section class="opportunity-list">${rows||'<div class="empty-state compact"><h2>Sem oportunidades suficientemente fundamentadas</h2><p>Não foram encontrados desvios recentes que cumpram os critérios de amostra, consistência e dimensão do sinal. Não vamos preencher o Top 10 artificialmente.</p></div>'}</section>
- <p class="footnote">O índice ordena desvios descritivos recentes. Não é probabilidade de acerto, linha de bookmaker nem EV. Os estados médicos relevantes são apresentados junto ao jogador; a ausência de indicação não significa confirmação médica de disponibilidade.</p>`;
+ <section class="opportunity-list">${rows||'<div class="empty-state compact"><h2>Sem oportunidades elegíveis</h2><p>Não foram encontradas oportunidades com probabilidade estimada igual ou superior a 60%, atividade mínima e limites de concentração respeitados. A lista não será preenchida artificialmente.</p></div>'}</section>
+ <p class="footnote">O índice combinado é uma métrica de ordenação, não uma probabilidade. PROVISÓRIA significa que ainda não existe histórico suficiente de previsões anteriores resolvidas para validar a calibração. Não representa EV nem substitui a comparação com odds de bookmaker.</p>`;
 }
 function validator(){return `
 <section class="page-title">
@@ -341,6 +343,23 @@ async function runScan(){
    if (player?.id && !uniquePlayers.has(String(player.id))) uniquePlayers.set(String(player.id), player);
   }
   scanPlayers = [...uniquePlayers.values()];
+  // Associar jogadores a jogos apenas com correspondência inequívoca da equipa.
+  const normalizeTeam=(value:string)=>value.normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+  const teamGames=new Map<string,Set<string>>();
+  for(const event of scanEvents){
+   for(const competitor of event.competitions?.[0]?.competitors||[]){
+    const teamName=competitor.team?.displayName;
+    if(!teamName)continue;
+    const key=normalizeTeam(teamName);
+    const ids=teamGames.get(key)||new Set<string>();
+    ids.add(event.id);
+    teamGames.set(key,ids);
+   }
+  }
+  scanPlayers=scanPlayers.map(player=>{
+   const ids=teamGames.get(normalizeTeam(player.team_name));
+   return ids?.size===1?{...player,game_id:[...ids][0]}:player;
+  });
   scanOpportunities=[];
   scanAnalysisCoverage={requested:scanPlayers.length,loaded:0,noHistory:0,failed:0,retried:0};
   const today=new Date(); const season=today.getMonth()>=6?today.getFullYear():today.getFullYear()-1;

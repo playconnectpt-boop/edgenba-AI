@@ -1,0 +1,547 @@
+// @ts-ignore -- Vite processa este CSS em runtime; não é um módulo TypeScript.
+import './style.css';
+import { parseEspnInjuryReport } from './injuries';
+import { adaptEspnGamelog, buildPlayerProfile, rankPlayerTrends, uniquePlayersTop, type StatLine, type Market } from './engine';
+
+type Tab = 'dashboard'|'scan'|'opportunities'|'validator'|'history'|'settings';
+type ESPNScoreboard = { source: string; retrievedAt: string; data: { events?: Array<{ id: string; name: string; date: string; status?: { type?: { description?: string } }; competitions?: Array<{ competitors?: Array<{ team?: { displayName?: string; abbreviation?: string } }> }> }> } };
+const app = document.querySelector<HTMLDivElement>('#app')!;
+const tabs: {id:Tab;label:string;icon:string}[] = [
+  {id:'dashboard',label:'Início',icon:'⌂'}, {id:'scan',label:'Análise',icon:'◎'},
+  {id:'opportunities',label:'Top 10',icon:'↗'}, {id:'validator',label:'Ones to Watch',icon:'✦'},
+  {id:'history',label:'Histórico',icon:'◷'}
+];
+let active:Tab='dashboard';
+let authenticated = false;
+let authMessage = '';
+let installPrompt: BeforeInstallPromptEvent | null = null;
+const viteEnv = (import.meta as ImportMeta & { env?: { VITE_API_BASE?: string; DEV?: boolean } }).env;
+const API_BASE = (viteEnv?.DEV ? '' : (viteEnv?.VITE_API_BASE || 'https://edge-nba-ai-api.edge-nba-ai-tips.workers.dev')).replace(/\/$/, '');
+
+interface BeforeInstallPromptEvent extends Event { prompt(): Promise<void>; userChoice: Promise<{outcome:'accepted'|'dismissed'}> }
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt=e as BeforeInstallPromptEvent; render(); });
+
+const marketNames: Record<string,string> = {points:'Pontos',rebounds:'Ressaltos',assists:'Assistências',threes:'Triplos',pra:'PRA'};
+type ESPNPlayer = { id: string; name: string; team_name?: string; position?: string; league_name?: string };
+let espnPlayers: ESPNPlayer[] = [];
+let espnSelectedPlayer: ESPNPlayer | null = null;
+let espnRows: StatLine[] = [];
+let espnProfile: ReturnType<typeof buildPlayerProfile> | null = null;
+let espnMessage = '';
+type ESPNEvent = { id:string; name:string; date:string; status?:{type?:{description?:string}}; competitions?:Array<{competitors?:Array<{team?:{displayName?:string;abbreviation?:string}}>} > };
+let scanEvents: ESPNEvent[] = [];
+let scanRetrievedAt = '';
+let scanInjuryText = 'Relatório de lesões ainda não consultado';
+type ScanPlayer = { id:string; espn_id?:string|null; name:string; team_name:string; position?:string|null; rotation_games?:number; avg_minutes?:number; recent10_avg_minutes?:number; status?:string; rotation_eligible?:boolean };
+let scanPlayers: ScanPlayer[] = [];
+let scanRosterStatus = 'Plantéis ainda não consultados';
+let scanAvailabilityRows = '';
+let scanOpportunities: import('./engine').TrendCandidate[] = [];
+let scanAnalysisStatus = 'Históricos ainda não analisados.';
+let scanAnalysisCoverage = { requested: 0, loaded: 0, noHistory: 0, failed: 0, retried: 0 };
+const render = () => {
+ if (!authenticated) {
+  app.innerHTML = `
+   <main class="auth-shell">
+    <section class="panel auth-panel">
+     <div class="brand"><img class="mark" src="/edge-nba-ai-logo.png" alt="EDGE NBA AI" /><div><b>EDGE NBA AI</b><small>ACESSO PRIVADO</small></div></div>
+     <p class="eyebrow">AUTENTICAÇÃO</p><h1>Entrar na plataforma</h1>
+     <p class="sub">Introduz a palavra-passe para aceder à tua aplicação.</p>
+     <form id="login-form">
+      <label>Palavra-passe<input id="login-password" type="password" autocomplete="current-password" required placeholder="A tua palavra-passe"></label>
+      <button class="primary full" id="login-submit" type="submit">Entrar</button>
+      <p id="login-message" class="footnote" role="alert">${escapeHtml(authMessage)}</p>
+     </form>
+    </section>
+   </main>`;
+  document.querySelector<HTMLFormElement>('#login-form')?.addEventListener('submit', async e => {
+   e.preventDefault();
+   const button = document.querySelector<HTMLButtonElement>('#login-submit');
+   const password = (document.querySelector<HTMLInputElement>('#login-password')?.value || '');
+   const message = document.querySelector<HTMLParagraphElement>('#login-message');
+   if (button) { button.disabled = true; button.textContent = 'A validar…'; }
+   if (message) message.textContent = '';
+   try {
+    const response = await fetch(`${API_BASE}/api/login`, {
+     method: 'POST', credentials: 'include',
+     headers: { 'content-type': 'application/json' },
+     body: JSON.stringify({ password })
+    });
+    if (!response.ok) throw new Error(response.status === 401 ? 'Palavra-passe incorreta.' : `Erro de autenticação (HTTP ${response.status}).`);
+    authenticated = true; authMessage = ''; render();
+   } catch (error) {
+    authMessage = String(error);
+    if (message) message.textContent = authMessage;
+    if (button) { button.disabled = false; button.textContent = 'Entrar'; }
+   }
+  });
+  return;
+ }
+ const content = active==='dashboard' ? dashboard() : active==='scan' ? scan() : active==='opportunities' ? opportunities() : active==='validator' ? validator() : active==='history' ? history() : settings();
+ app.innerHTML = `
+  <header><div class="brand"><img class="mark" src="/edge-nba-ai-logo.png" alt="EDGE NBA AI" /><div><b>EDGE NBA AI</b><small>QUANTITATIVE PLAYER PROP RESEARCH</small></div></div><span class="env"><i></i> EDGE NBA AI · ONLINE</span></header>
+  <main>${content}</main>
+  <nav>${tabs.map(t=>`<button class="nav-item ${active===t.id?'selected':''}" data-tab="${t.id}"><span>${t.icon}</span><small>${t.label}</small></button>`).join('')}</nav>`;
+ document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach(b=>b.addEventListener('click',()=>{active=b.dataset.tab as Tab;render()}));
+ document.querySelector('#install')?.addEventListener('click',async()=>{if(installPrompt){await installPrompt.prompt();installPrompt=null;render()}else alert('No Android: menu do navegador → Adicionar ao ecrã inicial. No iPhone: Safari → Partilhar → Adicionar ao ecrã principal.')});
+  document.querySelector('#run-scan')?.addEventListener('click',runScan);
+ if(active==='validator'){
+  document.querySelector('#refresh-ones-to-watch')?.addEventListener('click',()=>void loadOnesToWatch());
+  void loadOnesToWatch();
+ }
+ document.querySelector('#espn-search')?.addEventListener('click',searchEspnPlayer);
+ document.querySelector('#espn-player-name')?.addEventListener('keydown',e=>{if((e as KeyboardEvent).key==='Enter'){e.preventDefault();void searchEspnPlayer();}});
+ document.querySelector('#espn-season')?.addEventListener('keydown',e=>{if((e as KeyboardEvent).key==='Enter'){e.preventDefault();}});
+ document.querySelectorAll<HTMLButtonElement>('[data-espn-player]').forEach(b=>b.addEventListener('click',()=> {
+  const player=espnPlayers.find(p=>p.id===b.dataset.espnPlayer);
+  if(player) void loadEspnGamelog(player);
+ }));
+ document.querySelector('#check-provider')?.addEventListener('click',()=>alert('Ainda não existem credenciais ou contrato de API configurados.'));
+};
+function dashboard(){return `
+ <section class="hero"><p class="eyebrow">NBA · DAILY RESEARCH SYSTEM</p><h1>Investigar tudo.<br><em>Selecionar com critério.</em></h1><p class="sub">Análise integral dos jogos e jogadores. Até 10 oportunidades fundamentadas por dia. O sistema não inventa dados para preencher a lista.</p><div class="hero-actions"><button class="primary" data-tab="scan" id="go-scan">Abrir análise diária</button></div></section>
+ 
+ <section class="panel"><div class="section-head"><div><p class="eyebrow">PIPELINE DE ANÁLISE</p><h2>Como funciona</h2></div><span class="chip">3 módulos</span></div><div class="pipeline">${[['01','Análise diária','Jogos, jogadores, lesões, minutos e contexto'],['02','Top 10','Oportunidades estatísticas selecionadas pelo motor'],['03','Ones to Watch','Uma escolha diária de potencial surpresa, com riscos e confiança']].map(x=>`<div class="pipe-row"><b>${x[0]}</b><div><strong>${x[1]}</strong><small>${x[2]}</small></div><span>›</span></div>`).join('')}</div></section>
+ `}
+function scan(){return `<section class="page-title"><p class="eyebrow">FASE 1 · SCANNER AUTOMÁTICO</p><h1>Jogos das próximas 24 horas</h1><p class="sub">Janela móvel baseada na hora local de Portugal. O calendário é filtrado pelo horário real de cada encontro, não apenas pela data.</p></section><section class="panel"><div class="section-head"><h2>Mercados a investigar</h2><span class="chip">NBA</span></div><div class="market-grid">${Object.values(marketNames).map(m=>`<div class="market-card"><b>${m}</b><small>Player props</small></div>`).join('')}</div><div class="check-list">${['Calendário completo e estado dos jogos','Registos individuais jogo a jogo','Minutos, titularidade e rotação','Lesões: out, doubtful, questionable, probable','Cenários com e sem jogadores em dúvida','Impacto na utilização e oportunidades dos colegas','Confronto defensivo, ritmo e contexto','Amostras, outliers e qualidade dos dados'].map(x=>`<div><span>✓</span>${x}</div>`).join('')}</div><button class="primary full" id="run-scan">Analisar jogos das próximas 24 horas</button><p class="footnote">Primeira etapa: calendário ESPN, filtro exacto de 24 horas e relatório de lesões. O ranking estatístico só será criado depois de ligar a pesquisa de jogadores e os históricos ESPN por equipa.</p><div id="scan-results" class="scan-results" aria-live="polite"><p class="muted">Ainda não foram consultadas fontes.</p></div></section>
+ <section class="panel"><div class="section-head"><div><p class="eyebrow">ESPN · PLAYER GAMELOG</p><h2>Pesquisar jogador</h2></div><span class="chip">ESPN</span></div>
+ <p class="sub">Pesquisa um jogador e carrega os registos jogo a jogo directamente da ESPN.</p>
+ <div class="two"><label>Nome do jogador<input id="espn-player-name" value="LeBron James" placeholder="Ex.: LeBron James"></label><label>Época ESPN<input id="espn-season" type="number" min="2019" max="2035" value="2026"></label></div>
+ <button class="primary full" id="espn-search">Pesquisar jogador na ESPN</button>
+ <div id="espn-results" class="scan-results" aria-live="polite"><p class="muted">Ainda não foi feita nenhuma pesquisa ESPN.</p></div>
+ <div id="espn-profile" class="scan-results" aria-live="polite"></div>
+ </section><section class="panel"><p class="eyebrow">CRITÉRIO DE SELEÇÃO</p><h2>Até 10 oportunidades</h2><p class="body-copy">A lista é ordenada por qualidade estatística, estabilidade da projeção, contexto e incerteza. Se só existirem 4 oportunidades que cumpram os critérios, serão apresentadas 4.</p></section>`}
+function opportunities(){
+ const unique=uniquePlayersTop(scanOpportunities,10);
+ const rows=unique.map((x,i)=>{
+  const player=scanPlayers.find(p=>p.id===x.playerId);
+  const playerStatus=player?.status||'';
+  const conditional=/QUESTIONÁVEL|DUVIDOSO/.test(playerStatus);
+  const photoId=String(player?.espn_id||'').replace(/\D/g,'');
+  const initials=x.playerName.split(/\s+/).filter(Boolean).slice(0,2).map(n=>n[0]).join('').toUpperCase();
+  const photo=photoId
+   ? `<img src="https://a.espncdn.com/i/headshots/nba/players/full/${photoId}.png" alt="${escapeHtml(x.playerName)}" loading="lazy" onerror="this.parentElement.classList.add('no-photo');this.remove()">`
+   : '';
+  const hitRate=x.lineHitRate===null?'N/D':(x.lineHitRate*100).toFixed(0)+'%';
+  const previousHitRate=x.previousLineHitRate===null?'N/D':(x.previousLineHitRate*100).toFixed(0)+'%';
+
+  return `<article class="opportunity-card">
+   <div class="opportunity-main">
+    <div class="player-photo ${photo?'':'no-photo'}">${photo}<span>${escapeHtml(initials)}</span></div>
+    <div class="player-info">
+     <div class="player-rank">OPORTUNIDADE #${i+1}</div>
+     <h3>${escapeHtml(x.playerName)}</h3>
+     <p>${escapeHtml(x.teamName)}${player?.position?' · '+escapeHtml(player.position):''}</p>
+     ${playerStatus?`<span class="medical-status ${conditional?'conditional':''}">${escapeHtml(playerStatus)}${conditional?' · CENÁRIO CONDICIONAL':''}</span>`:''}
+    </div>
+    <div class="opportunity-score"><strong>${x.score}</strong><small>ÍNDICE DESCRITIVO</small></div>
+   </div>
+   <div class="opportunity-pick">
+    <div><small>MERCADO</small><strong>${escapeHtml(x.marketLabel)}</strong></div>
+    <div><small>LINHA SUGERIDA</small><strong class="pick-line">${x.suggestedLine.toFixed(1)} <span>${escapeHtml(x.direction)}</span></strong></div>
+    <div><small>QUALIDADE</small><strong>${escapeHtml(x.quality)}</strong></div>
+    <div><small>CONFIANÇA</small><strong>${escapeHtml(x.confidence)}</strong></div>
+   </div>
+   <div class="opportunity-explanation">${escapeHtml(x.explanation)}</div>
+   <div class="opportunity-stats">
+    <div class="stat-box"><small>MÉDIA · ÚLTIMOS 5</small><strong>${x.recentMean.toFixed(1)}</strong><span>${x.recentSample} registos</span></div>
+    <div class="stat-box"><small>MÉDIA · ÚLTIMOS 10</small><strong>${x.recent10Mean.toFixed(1)}</strong><span>jogos recentes</span></div>
+    <div class="stat-box"><small>5 ANTERIORES</small><strong>${x.previousMean.toFixed(1)}</strong><span>${x.previousSample} registos</span></div>
+    <div class="stat-box"><small>MÉDIA DA ÉPOCA</small><strong>${x.seasonMean.toFixed(1)}</strong><span>${x.seasonSample} registos</span></div>
+   </div>
+   <div class="opportunity-detail">
+    <div class="detail-heading">RESULTADOS RECENTES</div>
+    <div class="recent-results">${x.recentResults.map(value=>`<span>${value.toFixed(1)}</span>`).join('')}</div>
+    <div class="detail-metrics">
+     <span>Tendência: <b>${x.trendHits}/${x.recentSample} (${(x.trendHitRate*100).toFixed(0)}%)</b></span>
+     <span>Mesma linha: <b>${x.lineHits}/${x.lineSample} (${hitRate})</b>${x.linePushes?' · '+x.linePushes+' pushes':''}</span>
+     <span>5 anteriores na mesma linha: <b>${x.previousLineHits}/${x.previousLineSample} (${previousHitRate})</b>${x.previousLinePushes?' · '+x.previousLinePushes+' pushes':''}</span>
+    </div>
+   </div>
+  </article>`;
+ }).join('');
+
+ return `<section class="page-title"><p class="eyebrow">FASE 2 · RANKING ESTATÍSTICO</p><h1>Top 10 <em>Oportunidades</em></h1><p class="sub">Jogadores com alterações recentes sustentadas nos dados. O ranking é estatístico e não representa probabilidade de acerto ou valor confirmado.</p></section>
+ <section class="ranking-summary"><div><span>SELEÇÕES APROVADAS</span><strong>${unique.length}<small> / 10</small></strong></div><div><span>HISTÓRICOS CARREGADOS</span><strong>${scanAnalysisCoverage.loaded}</strong></div><div><span>FALHAS DEFINITIVAS</span><strong>${scanAnalysisCoverage.failed}</strong></div></section>
+ <div class="notice ranking-notice"><b>${escapeHtml(scanAnalysisStatus)}</b><p>Históricos solicitados: ${scanAnalysisCoverage.requested} · Carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · Falhas definitivas: ${scanAnalysisCoverage.failed} · Recuperados após repetição: ${scanAnalysisCoverage.retried}</p></div>
+ <section class="opportunity-list">${rows||'<div class="empty-state compact"><h2>Sem oportunidades suficientemente fundamentadas</h2><p>Não foram encontrados desvios recentes que cumpram os critérios de amostra, consistência e dimensão do sinal. Não vamos preencher o Top 10 artificialmente.</p></div>'}</section>
+ <p class="footnote">O índice ordena desvios descritivos recentes. Não é probabilidade de acerto, linha de bookmaker nem EV. Os estados médicos relevantes são apresentados junto ao jogador; a ausência de indicação não significa confirmação médica de disponibilidade.</p>`;
+}
+function validator(){return `
+<section class="page-title">
+ <p class="eyebrow">EDGE NBA AI · DAILY SPECIAL PICK</p>
+ <h1>Ones to <em>Watch</em></h1>
+ <p class="sub">Uma escolha diária de potencial surpresa, com fundamentação, confiança e riscos.</p>
+</section>
+<section class="panel">
+ <div class="section-head"><div><p class="eyebrow">DAILY SELECTION</p><h2>Escolha do dia</h2></div><span class="chip">1 PICK / DIA</span></div>
+ <div id="otw-current" class="scan-results"><p class="muted">A carregar a escolha diária...</p></div>
+ <button class="secondary full" id="refresh-ones-to-watch">Atualizar dados</button>
+ <p class="footnote">A escolha fica guardada por data. Atualizar não altera uma seleção já registada.</p>
+</section>
+<section class="panel">
+ <div class="section-head"><div><p class="eyebrow">TRACK RECORD</p><h2>Escolhas anteriores</h2></div></div>
+ <div id="otw-history" class="scan-results"><p class="muted">A carregar histórico...</p></div>
+</section>`}
+
+function otwEscape(value:unknown):string {
+ return escapeHtml(String(value??'—'));
+}
+function otwList(items:unknown,empty:string):string {
+ if(!Array.isArray(items)||!items.length)return `<p class="muted">${empty}</p>`;
+ return `<ul class="rules">${items.map(x=>`<li>${otwEscape(x)}</li>`).join('')}</ul>`;
+}
+async function loadOnesToWatch(){
+ const target=document.querySelector<HTMLDivElement>('#otw-current');
+ const historyTarget=document.querySelector<HTMLDivElement>('#otw-history');
+ const button=document.querySelector<HTMLButtonElement>('#refresh-ones-to-watch');
+ if(!target)return;
+ if(button){button.disabled=true;button.textContent='A atualizar...';}
+ target.innerHTML='<p class="muted">A consultar a seleção diária...</p>';
+
+ try{
+  const response=await fetch(`${API_BASE}/api/ones-to-watch`,{credentials:'include'});
+  const data=await response.json() as {success?:boolean;cached?:boolean;pick?:Record<string,any>;error?:string;message?:string};
+  const p=data.pick;
+  const explanation=p?.explanation||{};
+  const source=p?.source||{};
+  if(!response.ok||!p){
+   target.innerHTML=`<div class="notice"><b>Escolha diária indisponível</b><p>${otwEscape(data.message||data.error||`HTTP ${response.status}`)}</p><p class="footnote">Confirma se a D1 local contém históricos suficientes.</p></div>`;
+  }else{
+   const market=marketNames[String(p.market)]||p.marketLabel||p.market||'—';
+   const absences=[...(Array.isArray(explanation.confirmedAbsences)?explanation.confirmedAbsences:[]),...(Array.isArray(explanation.absentTeammates)?explanation.absentTeammates:[])];
+   target.innerHTML=`
+   <article class="opportunity-card">
+    <div class="section-head"><span class="chip">ESCOLHA DIÁRIA</span><span class="chip">${otwEscape(p.confidence)}</span></div>
+    <p class="eyebrow">${otwEscape(p.teamName)}</p>
+    <h2>${otwEscape(p.playerName)}</h2>
+    <div class="ranking-summary">
+     <div><span>MERCADO</span><strong>${otwEscape(market)}</strong></div>
+     <div><span>DIREÇÃO</span><strong>${otwEscape(p.direction)}</strong></div>
+     <div><span>LINHA</span><strong>${otwEscape(p.suggestedLine)}</strong></div>
+    </div>
+    <div class="source-row"><span>Índice interno</span><b>${otwEscape(p.score)}/100</b></div>
+    <div class="source-row"><span>Média recente</span><b>${otwEscape(typeof explanation.recentMean==="number"?explanation.recentMean.toFixed(1):"—")}</b></div>
+    <div class="source-row"><span>Média da época</span><b>${otwEscape(typeof explanation.seasonMean==="number"?explanation.seasonMean.toFixed(1):"—")}</b></div>
+    <div class="source-row"><span>Minutos recentes</span><b>${otwEscape(typeof explanation.recentMinutes==="number"?explanation.recentMinutes.toFixed(1):"—")}</b></div>
+    <div class="source-row"><span>Minutos de referência</span><b>${otwEscape(typeof explanation.baselineMinutes==="number"?explanation.baselineMinutes.toFixed(1):"—")}</b></div>
+    <div class="source-row"><span>Amostra contextual</span><b>${otwEscape(explanation.contextualSample??0)} jogos</b></div>
+    <div class="source-row"><span>Amostra do jogador</span><b>${otwEscape(source.playerSample??0)} jogos</b></div>
+    <h3>Fundamentação</h3>${otwList(explanation.reasons,'Sem fundamentação adicional.')}
+    <h3>Ausências consideradas</h3>${otwList(absences,'Não existem ausências contextuais registadas.')}
+    <h3>Riscos</h3>${otwList(explanation.risks,'Sem riscos adicionais registados.')}
+    <h3>Limitações</h3>${otwList(explanation.limitations,'Sem limitações adicionais registadas.')}
+    <p class="footnote">${data.cached?'Escolha já guardada para esta data.':'Escolha guardada nesta consulta.'}</p>
+   </article>`;
+  }
+ }catch(error){
+  target.innerHTML=`<div class="notice"><b>Falha na ligação</b><p>${otwEscape(error)}</p></div>`;
+ }
+
+ if(historyTarget){
+  try{
+   const response=await fetch(`${API_BASE}/api/ones-to-watch/history?limit=15`,{credentials:'include'});
+   const data=await response.json() as {items?:Array<Record<string,any>>;history?:Array<Record<string,any>>};
+   const items=data.items||data.history||[];
+   historyTarget.innerHTML=response.ok&&items.length?items.map(p=>`
+    <div class="source"><span><b>${otwEscape(p.selection_date||p.selectionDate)} · ${otwEscape(p.player_name||p.playerName)}</b>
+    <small>${otwEscape(marketNames[String(p.market)]||p.market)} · ${otwEscape(p.direction)} ${otwEscape(p.suggested_line??p.suggestedLine)}</small></span>
+    <strong>${otwEscape(p.confidence)}</strong></div>`).join(''):'<p class="muted">Ainda não existem escolhas anteriores.</p>';
+  }catch{
+   historyTarget.innerHTML='<p class="muted">Não foi possível carregar o histórico.</p>';
+  }
+ }
+ if(button){button.disabled=false;button.textContent='Atualizar dados';}
+}
+
+
+function history(){return `<section class="page-title"><p class="eyebrow">CONTROLO DE DESEMPENHO</p><h1>Histórico</h1><p class="sub">Registo de previsões, linhas, odds introduzidas, resultados e calibração do modelo.</p></section><section class="status-grid"><article class="metric"><span>Previsões registadas</span><strong>0</strong></article><article class="metric"><span>Taxa de acerto</span><strong>—</strong></article><article class="metric"><span>ROI observado</span><strong>—</strong></article></section><section class="empty-state compact"><h2>Sem histórico disponível</h2><p>Os resultados só serão calculados com previsões guardadas antes dos jogos e resultados oficiais posteriores. O modelo será avaliado fora da amostra.</p></section>`}
+function settings(){return `<section class="page-title"><p class="eyebrow">CONFIGURAÇÃO</p><h1>Fontes e segurança</h1><p class="sub">A aplicação é privada e protegida por sessão.</p></section><section class="panel"><h2>Autenticação</h2><p class="body-copy">Acesso protegido pelo Worker Cloudflare. A sessão expira após 7 dias.</p><div class="source-row"><span>Proteção de acesso</span><b class="pending">ATIVA</b></div></section><section class="panel"><h2>Fornecedores de dados</h2>${provider('NBA statistics','Dados históricos e box scores','POR CONFIGURAR')}${provider('Injury report','Estado oficial dos jogadores','POR CONFIGURAR')}<button class="secondary full" id="check-provider">Verificar configuração</button></section><section class="panel"><h2>Política de integridade</h2><ul class="rules"><li>Guardar fonte e timestamp de cada registo.</li><li>Separar factos confirmados de cenários condicionais.</li><li>Não confundir hit rate histórico com probabilidade futura.</li><li>Não declarar EV sem odd válida e previsão calibrada.</li><li>Registar versão do modelo e dados usados.</li></ul></section>`}
+function provider(name:string,desc:string,status:string){return `<div class="source"><span><b>${name}</b><small>${desc}</small></span><strong class="pending">${status}</strong></div>`}
+
+async function runScan(){
+ const target=document.querySelector<HTMLDivElement>('#scan-results');
+ const button=document.querySelector<HTMLButtonElement>('#run-scan');
+ if(!target||!button)return;
+ button.disabled=true;button.textContent='A analisar janela de 24 horas…';
+ target.innerHTML='<p class="muted">A consultar apenas os jogos das próximas 24 horas e os estados de disponibilidade.</p>';
+ const now=new Date();
+ const windowEnd=new Date(now.getTime()+24*60*60*1000);
+ const dayStart=new Date(now);dayStart.setHours(0,0,0,0);
+ const dates:string[]=[];
+ for(let offset=0;offset<=1;offset++){
+  const day=new Date(dayStart);day.setDate(dayStart.getDate()+offset);
+  dates.push(`${day.getFullYear()}${String(day.getMonth()+1).padStart(2,'0')}${String(day.getDate()).padStart(2,'0')}`);
+ }
+ try{
+  // Em produção, atualizar calendário e IDs ESPN.
+  // Em desenvolvimento local, usar os dados já existentes na D1 sem escrever na produção.
+  if (!viteEnv?.DEV) {
+   const syncResponses = await Promise.all([
+    fetch(`${API_BASE}/api/espn/games`,{credentials:'include'}),
+    fetch(`${API_BASE}/api/espn/sync-player-ids`,{credentials:'include'})
+   ]);
+   for (const syncResponse of syncResponses) {
+    if (!syncResponse.ok) { const detail = await syncResponse.json().catch(()=>null) as {error?:string}|null; throw new Error(detail?.error || `Sincronização ESPN: HTTP ${syncResponse.status}`); }
+   }
+  }
+  const scoreboardResponses=await Promise.all(dates.map(async date=>{
+   const response=await fetch(`${API_BASE}/api/espn/scoreboard?date=${date}`,{credentials:'include'});
+   if(!response.ok)throw new Error(`Calendário ESPN (${date}): HTTP ${response.status}`);
+   return await response.json() as ESPNScoreboard;
+  }));
+  const injPromise=fetch(`${API_BASE}/api/espn/injuries`,{credentials:'include'}).catch(()=>null);
+  const unique=new Map<string,NonNullable<ESPNScoreboard['data']['events']>[number]>();
+  for(const payload of scoreboardResponses){
+   for(const event of payload.data?.events||[]){
+    const kickoff=Date.parse(event.date);
+    if(Number.isFinite(kickoff)&&kickoff>=now.getTime()&&kickoff<=windowEnd.getTime())unique.set(event.id,event);
+   }
+  }
+  scanEvents=[...unique.values()].sort((a,b)=>Date.parse(a.date)-Date.parse(b.date));
+  scanRetrievedAt=new Date().toISOString();
+  scanInjuryText='Relatório de lesões indisponível';
+  let injuryStatuses=new Map<string,string>();
+  let injuryReportAvailable=false;
+  const injRes=await injPromise;
+  if(injRes?.ok){
+   const injuryPayload=await injRes.json() as {retrievedAt?:string;data?:unknown};
+   const parsedReport=parseEspnInjuryReport(injuryPayload);
+   injuryStatuses=parsedReport.statuses;
+   injuryReportAvailable=parsedReport.valid;
+   scanInjuryText=parsedReport.valid
+    ? injuryPayload.retrievedAt?`Relatório ESPN consultado às ${new Date(injuryPayload.retrievedAt).toLocaleTimeString('pt-PT')}`:'Relatório ESPN consultado'
+    : 'Relatório ESPN inválido ou com estrutura inesperada';
+  }
+
+  scanPlayers=[];
+  scanAvailabilityRows='';
+  scanRosterStatus='Sem jogos para descobrir jogadores.';
+  if(scanEvents.length){
+   const teamNames=Array.from(new Set(scanEvents.flatMap(ev=>(ev.competitions?.[0]?.competitors||[])
+    .map(c=>c.team?.displayName).filter((name):name is string=>!!name))));
+   // A lista de jogadores vem da D1 sincronizada com os plantéis ESPN.
+   const params=new URLSearchParams({teams:teamNames.join('|')});
+   const rosterResponse=await fetch(`${API_BASE}/api/scan/players?${params.toString()}`,{credentials:'include'});
+   const rosterPayload=await rosterResponse.json() as {error?:string;players?:ScanPlayer[];missing_teams?:string[];meta?:{players_count?:number;rotation_count?:number;teams_found?:number;teams_requested?:number}};
+   if(!rosterResponse.ok)throw new Error(rosterPayload.error||`Consulta de rotação: HTTP ${rosterResponse.status}`);
+   const roster=Array.isArray(rosterPayload.players)?rosterPayload.players:[];
+   scanPlayers=roster.filter(player=>player.rotation_eligible===true).map(player=>({
+    ...player,
+    status:injuryReportAvailable&&player.espn_id
+     ? injuryStatuses.get(player.espn_id)||''
+     : ''
+   }));
+   scanRosterStatus=`${scanPlayers.length} jogadores de rotação identificados (${rosterPayload.meta?.rotation_count??scanPlayers.length} elegíveis) em ${rosterPayload.meta?.teams_found??0}/${rosterPayload.meta?.teams_requested??teamNames.length} equipas`;
+   if(rosterPayload.missing_teams?.length)scanRosterStatus+=`. Equipas sem correspondência: ${rosterPayload.missing_teams.join(', ')}`;
+  }
+  // Remove IDs repetidos antes de pedir históricos: cada jogador deve ser contabilizado uma única vez.
+  const uniquePlayers = new Map<string, ScanPlayer>();
+  for (const player of scanPlayers) {
+   if (player?.id && !uniquePlayers.has(String(player.id))) uniquePlayers.set(String(player.id), player);
+  }
+  scanPlayers = [...uniquePlayers.values()];
+  scanOpportunities=[];
+  scanAnalysisCoverage={requested:scanPlayers.length,loaded:0,noHistory:0,failed:0,retried:0};
+  const today=new Date(); const season=today.getMonth()>=6?today.getFullYear():today.getFullYear()-1;
+  const candidates: import('./engine').TrendCandidate[]=[];
+  const failureReasons = new Map<string, number>();
+  const addFailureReason = (reason: string) => { const key = reason.slice(0, 180) || 'Erro sem detalhe'; failureReasons.set(key, (failureReasons.get(key) || 0) + 1); };
+  const batchSize=20; // Limite máximo aceite pelo endpoint do Worker.
+  const maxAttempts=2; // Uma tentativa inicial + uma única repetição para erros transitórios.
+  const retryableStatus=(status:number)=>status===408||status===425||status>=500;
+  const pause=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+  let espnRequestStop=false;
+
+  // Sem pré-teste: avançar diretamente para os históricos reais.
+  // Se a ESPN indicar rate limit, parar o scanner e não repetir pedidos.
+
+  for(let offset=0;offset<scanPlayers.length&&!espnRequestStop;offset+=batchSize){
+   const batch=scanPlayers.slice(offset,offset+batchSize);
+   let pending=[...batch];
+   const successfulResults=new Map<string,{data:unknown[]}>();
+   const attemptCounts=new Map<string,number>();
+   const terminalFailures=new Set<string>();
+
+   for(let attempt=1;attempt<=maxAttempts&&pending.length&&!espnRequestStop;attempt++){
+    target.innerHTML=`<div class="notice"><b>A analisar históricos individuais ESPN</b><p>${Math.min(offset+batch.length,scanPlayers.length)} / ${scanPlayers.length} jogadores enviados.</p><p>Históricos carregados: ${scanAnalysisCoverage.loaded} · Sem histórico: ${scanAnalysisCoverage.noHistory} · A recuperar: ${pending.length}.</p><p>Tentativa ${attempt}/${maxAttempts} (máximo de duas no scanner).</p></div>`;
+    const nextPending:ScanPlayer[]=[];
+
+    // Cada pedido contém no máximo 20 IDs. Os lotes são sequenciais.
+    for(let subOffset=0;subOffset<pending.length;subOffset+=batchSize){
+     const requestPlayers=pending.slice(subOffset,subOffset+batchSize);
+     requestPlayers.forEach(player=>attemptCounts.set(player.id,(attemptCounts.get(player.id)||0)+1));
+     try{
+      const response=await fetch(`${API_BASE}/api/espn/player-gamelogs`,{
+       method:'POST',credentials:'include',headers:{'content-type':'application/json'},
+       body:JSON.stringify({playerIds:requestPlayers.map(player=>player.id),season})
+      });
+      const payload=await response.json().catch(()=>null) as {
+       results?:Array<{playerId?:string;data?:unknown;error?:string}>;
+       error?:string;
+       rateLimited?:boolean;
+       retryAfterSeconds?:number;
+      }|null;
+      if(!response.ok){
+       const detail=typeof payload?.error==='string'?payload.error:`HTTP ${response.status}`;
+       addFailureReason(`Worker ${response.status}: ${detail}`);
+       if(response.status===429){
+        espnRequestStop=true;
+        for(const player of requestPlayers)terminalFailures.add(player.id);
+        break;
+       }
+       for(const player of requestPlayers){
+        if(!retryableStatus(response.status))terminalFailures.add(player.id);
+        else nextPending.push(player);
+       }
+       continue;
+      }
+
+      const results=Array.isArray(payload?.results)?payload.results:[];
+      const resultById=new Map<string,{playerId?:string;data?:unknown;error?:string}>();
+      for(const result of results){
+       if(result&&typeof result.playerId==='string'&&!resultById.has(result.playerId))resultById.set(result.playerId,result);
+      }
+      for(const player of requestPlayers){
+       const result=resultById.get(player.id);
+       if(!result||result.error||!Array.isArray(result.data)){
+        addFailureReason(result?.error||(!result?'Resposta Worker sem resultado para o ID':'Resposta Worker sem array data'));
+        if(!payload?.rateLimited)nextPending.push(player);
+        else terminalFailures.add(player.id);
+        continue;
+       }
+       successfulResults.set(player.id,{data:result.data});
+      }
+
+      if(payload?.rateLimited){
+       espnRequestStop=true;
+       const seconds=Number(payload.retryAfterSeconds);
+       addFailureReason(`ESPN rate limit: pedidos interrompidos${Number.isFinite(seconds)&&seconds>0?`; aguardar aproximadamente ${Math.ceil(seconds)} segundos`:''}`);
+       // Não repetir este lote nem enviar os lotes seguintes.
+       for(const player of requestPlayers){
+        if(!successfulResults.has(player.id))terminalFailures.add(player.id);
+       }
+       break;
+      }
+     }catch(error){
+      const detail=error instanceof Error?error.message:String(error);
+      addFailureReason(`Falha de comunicação com o Worker: ${detail}`);
+      requestPlayers.forEach(player=>nextPending.push(player));
+     }
+    }
+    pending=nextPending.filter(player=>!successfulResults.has(player.id)&&!terminalFailures.has(player.id));
+    if(pending.length&&attempt<maxAttempts&&!espnRequestStop)await pause(500*attempt);
+   }
+
+   for(const player of batch){
+   const result=successfulResults.get(player.id);
+    if(!result||terminalFailures.has(player.id)){scanAnalysisCoverage.failed++;continue;}
+    if((attemptCounts.get(player.id)||0)>1)scanAnalysisCoverage.retried++;
+    if(result.data.length===0){scanAnalysisCoverage.noHistory++;continue;}
+    try{
+     const rows=adaptEspnGamelog({data:result.data});
+     if(!rows.length){scanAnalysisCoverage.failed++;addFailureReason('Histórico recebido, mas sem linhas válidas após adaptação');continue;}
+     scanAnalysisCoverage.loaded++;
+     const status=player.status||'';
+     if(!/LESIONADO|SUSPENSO|INATIVO|OUT/i.test(status)) candidates.push(...rankPlayerTrends(player,rows));
+    }catch(error){
+     scanAnalysisCoverage.failed++;
+     addFailureReason(`Erro ao interpretar histórico: ${String(error)}`);
+    }
+   }
+
+   if(espnRequestStop){
+    // Contabilizar os jogadores ainda não enviados sem fazer mais chamadas à ESPN.
+    scanAnalysisCoverage.failed+=Math.max(0,scanPlayers.length-(offset+batch.length));
+    break;
+   }
+  }
+  scanOpportunities=candidates.sort((a,b)=>b.score-a.score);
+  scanAnalysisStatus=scanAnalysisCoverage.loaded===0?'Não foi possível carregar históricos ESPN válidos.':`Análise concluída: ${scanOpportunities.length} candidatos seleccionados após avaliar os históricos disponíveis.`;
+  const failureSummary = [...failureReasons.entries()].sort((a,b)=>b[1]-a[1]).slice(0,5).map(([reason,count])=>`<p>${count}x — ${escapeHtml(reason)}</p>`).join('');
+  target.innerHTML=`<div class="notice"><b>${scanEvents.length} jogos encontrados nas próximas 24 horas</b><p>${escapeHtml(scanRosterStatus)}</p><p>${escapeHtml(scanInjuryText)}</p><p>${escapeHtml(scanAnalysisStatus)}</p><p>Históricos: ${scanAnalysisCoverage.loaded} carregados · ${scanAnalysisCoverage.noHistory} sem registos nesta época · ${scanAnalysisCoverage.failed} falhas definitivas · ${scanAnalysisCoverage.retried} recuperados após repetição.</p>${failureSummary ? `<hr><b>Principais causas das falhas</b>${failureSummary}` : ''}</div><button class="primary full" id="open-opportunities">Ver shortlist de oportunidades (${scanOpportunities.length})</button>`;
+  document.querySelector('#open-opportunities')?.addEventListener('click',()=>{active='opportunities';render();});
+ }catch(error){
+  target.innerHTML=`<div class="notice"><b>Não foi possível concluir o scanner</b><p>${escapeHtml(String(error))}</p><p>Não foram fabricados jogos nem resultados para datas cuja consulta falhou.</p></div>`;
+ }finally{
+  button.disabled=false;button.textContent='Voltar a analisar as próximas 24 horas';
+ }
+}
+async function searchEspnPlayer(){
+ const input=document.querySelector<HTMLInputElement>('#espn-player-name');
+ const target=document.querySelector<HTMLDivElement>('#espn-results');
+ const button=document.querySelector<HTMLButtonElement>('#espn-search');
+ const name=input?.value.trim()||'';
+ if(!target||!button)return;
+ if(name.length<2){target.innerHTML='<p class="muted">Introduz pelo menos 2 caracteres.</p>';return;}
+ button.disabled=true;button.textContent='A pesquisar na ESPN…';
+ target.innerHTML='<p class="muted">A consultar a ESPN…</p>';
+ const seasonInput=document.querySelector<HTMLInputElement>('#espn-season');
+ const season=Number(seasonInput?.value);
+ if(!Number.isInteger(season)||season<2019||season>2035){
+  target.innerHTML='<p class="muted">Indica uma época válida (ano inicial, por exemplo 2025 para 2025-26).</p>';
+  button.disabled=false;button.textContent='Pesquisar jogador na ESPN';return;
+ }
+ try{
+  const response=await fetch(`${API_BASE}/api/espn/player-search?name=${encodeURIComponent(name)}`,{credentials:'include'});
+  const payload=await response.json() as {data?:unknown;error?:string};
+  if(!response.ok)throw new Error(payload.error||`Pesquisa ESPN: HTTP ${response.status}`);
+  if(!Array.isArray(payload.data))throw new Error('Resposta ESPN inválida: lista de jogadores em falta.');
+  espnPlayers=payload.data.filter((p):p is ESPNPlayer=>!!p&&typeof p==='object'&&typeof (p as ESPNPlayer).id==='string'&&typeof (p as ESPNPlayer).name==='string');
+  espnSelectedPlayer=null;espnRows=[];espnProfile=null;
+  if(!espnPlayers.length){target.innerHTML='<p class="muted">Não foram encontrados jogadores com esse nome.</p>';return;}
+  target.innerHTML=`<div class="notice"><b>${espnPlayers.length} resultado(s) encontrados</b><p>Selecciona o jogador correcto para carregar o histórico.</p></div>`+
+   espnPlayers.map(p=>`<div class="source"><span><b>${escapeHtml(p.name)}</b><small>${escapeHtml(p.team_name||'Equipa não indicada')} · ${escapeHtml(p.position||'Posição não indicada')}</small></span><button class="secondary" data-espn-player="${escapeHtml(p.id)}">Carregar histórico</button></div>`).join('');
+  target.querySelectorAll<HTMLButtonElement>('[data-espn-player]').forEach(b=>b.addEventListener('click',()=>{const player=espnPlayers.find(p=>p.id===b.dataset.espnPlayer);if(player)void loadEspnGamelog(player);}));
+ }catch(error){
+  target.innerHTML=`<div class="notice"><b>Falha na pesquisa ESPN</b><p>${escapeHtml(String(error))}</p></div>`;
+ }finally{
+  button.disabled=false;button.textContent='Pesquisar jogador na ESPN';
+ }
+}
+
+async function loadEspnGamelog(player:ESPNPlayer){
+ const target=document.querySelector<HTMLDivElement>('#espn-profile');
+ const results=document.querySelector<HTMLDivElement>('#espn-results');
+ const season=Number(document.querySelector<HTMLInputElement>('#espn-season')?.value);
+ if(!target)return;
+ target.innerHTML='<p class="muted">A carregar histórico jogo a jogo…</p>';
+ try{
+  const response=await fetch(`${API_BASE}/api/espn/player-gamelog?playerId=${encodeURIComponent(player.id)}&season=${encodeURIComponent(String(season))}`,{credentials:'include'});
+  const payload=await response.json() as {data?:unknown;error?:string;meta?:{cached?:boolean}};
+  if(!response.ok)throw new Error(payload.error||`Histórico ESPN: HTTP ${response.status}`);
+  const rows=adaptEspnGamelog(payload);
+  if(!rows.length)throw new Error('A ESPN respondeu, mas não foram encontrados registos válidos para esta época.');
+  espnSelectedPlayer=player;espnRows=rows;espnProfile=buildPlayerProfile(rows);
+  const markets:Market[]=['points','rebounds','assists','threes','pra'];
+  const labels:Record<Market,string>={points:'Pontos',rebounds:'Ressaltos',assists:'Assistências',threes:'Triplos',pra:'PRA'};
+  const fmt=(v:number|null)=>v===null?'—':v.toFixed(1);
+  const marketRows=markets.map(m=>{
+   const x=espnProfile!.markets[m] as {season:{sample:number;mean:number|null;median:number|null};last10:{sample:number;mean:number|null};last5:{sample:number;mean:number|null}};
+   return `<div class="source"><span><b>${labels[m]}</b><small>Época: ${x.season.sample} jogos · Média ${fmt(x.season.mean)} · Mediana ${fmt(x.season.median)}</small></span><strong>5J: ${fmt(x.last5.mean)}<br>10J: ${fmt(x.last10.mean)}</strong></div>`;
+  }).join('');
+  const recent=rows.slice(0,5).map(g=>{
+   const attempts=typeof g.threePointAttempts==='number'&&Number.isFinite(g.threePointAttempts)&&g.threePointAttempts>0
+    ? ` / ${g.threePointAttempts} 3PA · ${(g.threes/g.threePointAttempts*100).toFixed(1).replace('.',',')}%`
+    : '';
+   return `<div class="source"><span><b>${escapeHtml(g.date)}</b><small>${g.minutes} min</small></span><strong>${g.points} PTS · ${g.rebounds} REB · ${g.assists} AST · ${g.threes} 3PM${attempts} · ${g.pra} PRA</strong></div>`;
+  }).join('');
+  target.innerHTML=`<div class="notice"><b>Histórico carregado com sucesso</b><p>${escapeHtml(player.name)} · ${escapeHtml(player.team_name||'Equipa não indicada')} · Época ${season}-${String(season+1).slice(-2)} · ${rows.length} jogos válidos</p></div><h3>Resumo estatístico</h3>${marketRows}<h3>Últimos 5 jogos</h3>${recent}<p class="footnote">Fonte: ESPN / Cloudflare D1. Estatísticas descritivas; ainda não representam probabilidades calibradas nem recomendações.</p>`;
+  if(results)results.innerHTML=`<div class="notice"><b>${escapeHtml(player.name)} seleccionado</b><p>ID ESPN: ${escapeHtml(player.id)}</p></div>`;
+ }catch(error){
+  target.innerHTML=`<div class="notice"><b>Falha ao carregar histórico</b><p>${escapeHtml(String(error))}</p></div>`;
+  espnSelectedPlayer=null;espnRows=[];espnProfile=null;
+ }
+}
+
+function escapeHtml(value:string){return value.replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]||ch));}
+
+async function startApp(){
+ try {
+  const response = await fetch(`${API_BASE}/api/health`, { credentials: 'include' });
+  authenticated = response.ok;
+ } catch { authenticated = false; }
+ render();
+}
+void startApp();
+if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
