@@ -338,7 +338,7 @@ async function runScan(){
    const rosterPayload=await rosterResponse.json() as {error?:string;players?:ScanPlayer[];missing_teams?:string[];meta?:{players_count?:number;rotation_count?:number;teams_found?:number;teams_requested?:number}};
    if(!rosterResponse.ok)throw new Error(rosterPayload.error||`Consulta de rotação: HTTP ${rosterResponse.status}`);
    const roster=Array.isArray(rosterPayload.players)?rosterPayload.players:[];
-   scanPlayers=roster.filter(player=>player.rotation_eligible===true).map(player=>({
+   scanPlayers=roster.filter(player => Boolean(player.espn_id)).map(player=>({
     ...player,
     status: !injuryReportAvailable
      ? 'RELATÓRIO INDISPONÍVEL'
